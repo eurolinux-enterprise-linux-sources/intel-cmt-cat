@@ -1,0 +1,128 @@
+======================================================================
+Not Released
+======================================================================
+
+Contributors (alphabetical order):
+	Aaron Hetherington <aaron.hetherington@intel.com>
+	Marcel Cornu <marcel.d.cornu@intel.com>
+	Tomasz Kantecki <tomasz.kantecki@intel.com>
+	Wojciech Andralojc <wojciechx.andralojc@intel.com>
+
+Summary:
+1. Library
+	- Perl interface extended to support L2 CAT and CMT
+        - Logging extended to allow callback and silence functionality
+	- L2 CAT updated to operate on a per cluster/L2 ID basis
+	- Support for MBA
+2. SNMP
+	- Added CMT support to Net-SNMP sub-agent
+3. PQoS Utility
+	- L2 CAT updated to operate on a per cluster/L2 ID basis
+	- Support for MBA
+4. rdtset Utility
+	- L2 CAT updated to operate on a per cluster/L2 ID basis
+
+======================================================================
+Release  v0.1.5  2016-09-20
+======================================================================
+
+Contributors (alphabetical order):
+	Aaron Hetherington <aaron.hetherington@intel.com>
+	Colin Ian King <colin.king@canonical.com>
+	Fan Du <fan.du@intel.com>
+	Marcel Cornu <marcel.d.cornu@intel.com>
+	Pablo Marcos Oltra <pablo.marcos.oltra@intel.com>
+	Tomasz Kantecki <tomasz.kantecki@intel.com>
+	Wojciech Andralojc <wojciechx.andralojc@intel.com>
+
+Summary:
+1. General
+	- Project file layout changed to accommodate extensions
+	- Support for FreeBSD
+	- Travis CI
+2. Library
+	- Support for Intel(R) Xeon(R) processor E5 v4
+	- DSO built by default
+	- examples moved to the top folder
+	- Perl interface created for the library
+	- PID API no longer compiled by default
+	- Support for L2 CAT
+	- Makefile dependencies improved
+3. PQoS Utility
+	- pqos directory created to accommodate the utility files
+	- Link against DSO
+	- COS management on a per socket basis
+	- Support for L2 CAT
+	- Makefile dependencies improved
+4. rdtset Utility
+	- rdtset directory created to accommodate the utility files
+	- Link against DSO
+	- taskset-like functionality and CAT configuration
+	- Support for L2 CAT
+	- Makefile dependencies improved
+5. Examples
+	- Copied examples previously located in library directory
+	- Perl hello world script created
+6. SNMP
+	- Net-SNMP sub-agent created to allow remote CAT configuration
+7. SRPM
+	- Source package file and spec file
+
+======================================================================
+Release  v0.1.4  2016-02-04
+======================================================================
+
+Contributors (alphabetical order):
+	Aaron Hetherington <aaron.hetherington@intel.com>
+	Colin Ian King <colin.king@canonical.com>
+	Colm Moore <colm.moore@intel.com>
+	Jacek Turek <jacekx.turek@intel.com>
+	James Hunt <james.o.hunt@intel.com>
+	Marcel Cornu <marcel.d.cornu@intel.com>
+	Priya Autee <priya.v.autee@intel.com>
+	Tomasz Kantecki <tomasz.kantecki@intel.com>
+
+Summary:
+1. Hardware support
+	Intel(R) Xeon(R) processor E3 v4 support (selected SKU's)
+2. Monitoring
+	- PID/TID monitoring through Linux perf
+	- IPC (instructions per clock) performance event
+	- LLC misses performance event
+	- CSV output
+	- Monitoring core groups
+3. Allocation
+	- CDP (code data prioritization) detection and management
+4. General
+	- man page
+	- install and uninstall rules
+	- cppcheck & coding style rules
+
+======================================================================
+Release  v0.1.3  2015-05-01
+======================================================================
+
+Contributors (alphabetical order):
+	Pandi Maharajan <pandi.maharajan@intel.com>
+	Priya Autee <priya.v.autee@intel.com>
+	Rahul Shah <rahul.r.shah@intel.com>
+	Tomasz Kantecki <tomasz.kantecki@intel.com>
+
+Summary:
+1. Hardware support
+	Intel(R) Xeon(R) processor E5 v3 support (selected SKU's)
+	Intel(R) Xeon(R) processor D support
+2. Monitoring
+	- CMT (Cache Monitoring Technology) and
+	  MBM (Memory Bandwidth Monitoring) detection
+	- XML and text output formats
+	- output on console or file
+	- monitoring reset
+	- top mode - highest LLC occupancy first
+	- example CMT/MBM application
+3. Allocation
+	- CAT detection & management
+	- CAT reset
+	- example CAT application
+4. General
+	- configuration file support
