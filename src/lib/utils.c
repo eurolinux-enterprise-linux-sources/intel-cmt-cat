@@ -1,7 +1,7 @@
 /*
  * BSD LICENSE
  *
- * Copyright(c) 2014-2017 Intel Corporation. All rights reserved.
+ * Copyright(c) 2014-2019 Intel Corporation. All rights reserved.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -46,10 +46,26 @@
 
 #include "pqos.h"
 #include "types.h"
+#include "utils.h"
 
 #define TOPO_OBJ_SOCKET     0
 #define TOPO_OBJ_L2_CLUSTER 2
 #define TOPO_OBJ_L3_CLUSTER 3
+
+static int m_interface = PQOS_INTER_MSR;
+
+
+int
+_pqos_utils_init(int interface)
+{
+        if (interface == PQOS_INTER_OS_RESCTRL_MON)
+                m_interface = PQOS_INTER_OS;
+        else
+                m_interface = interface;
+
+        return PQOS_RETVAL_OK;
+}
+
 
 unsigned *
 pqos_cpu_get_sockets(const struct pqos_cpuinfo *cpu,
@@ -343,6 +359,8 @@ pqos_cap_get_type(const struct pqos_cap *cap,
         if (cap == NULL || cap_item == NULL)
                 return PQOS_RETVAL_PARAM;
 
+        *cap_item = NULL;
+
         ASSERT(type < PQOS_CAP_TYPE_NUMOF);
         if (type >= PQOS_CAP_TYPE_NUMOF)
                 return PQOS_RETVAL_PARAM;
@@ -381,11 +399,12 @@ pqos_cap_get_event(const struct pqos_cap *cap,
         ret = PQOS_RETVAL_ERROR;
 
         for (i = 0; i < mon->num_events; i++) {
-                if (mon->events[i].type == event) {
-                        *p_mon = &mon->events[i];
-                        ret = PQOS_RETVAL_OK;
-                        break;
-                }
+                if (mon->events[i].type != event)
+                        continue;
+
+                *p_mon = &mon->events[i];
+                ret = PQOS_RETVAL_OK;
+                break;
         }
 
         return ret;
@@ -404,7 +423,7 @@ pqos_l3ca_get_cos_num(const struct pqos_cap *cap,
 
         ret = pqos_cap_get_type(cap, PQOS_CAP_TYPE_L3CA, &item);
         if (ret != PQOS_RETVAL_OK)
-                return ret;                           /**< no L3CA capability */
+                return ret;                          /**< no L3CA capability */
 
         ASSERT(item != NULL);
         *cos_num = item->u.l3ca->num_classes;
@@ -424,7 +443,7 @@ pqos_l2ca_get_cos_num(const struct pqos_cap *cap,
 
         ret = pqos_cap_get_type(cap, PQOS_CAP_TYPE_L2CA, &item);
         if (ret != PQOS_RETVAL_OK)
-                return ret;                           /**< no L2CA capability */
+                return ret;                          /**< no L2CA capability */
 
         ASSERT(item != NULL);
         *cos_num = item->u.l2ca->num_classes;
@@ -444,7 +463,7 @@ pqos_mba_get_cos_num(const struct pqos_cap *cap,
 
         ret = pqos_cap_get_type(cap, PQOS_CAP_TYPE_MBA, &item);
         if (ret != PQOS_RETVAL_OK)
-                return ret;                           /**< no MBA capability */
+                return ret;                          /**< no MBA capability */
 
         ASSERT(item != NULL);
         *cos_num = item->u.mba->num_classes;
@@ -465,12 +484,66 @@ pqos_l3ca_cdp_enabled(const struct pqos_cap *cap,
 
         ret = pqos_cap_get_type(cap, PQOS_CAP_TYPE_L3CA, &item);
         if (ret != PQOS_RETVAL_OK)
-                return ret;                           /**< no L3CA capability */
+                return ret;                          /**< no L3CA capability */
 
         ASSERT(item != NULL);
         if (cdp_supported != NULL)
                 *cdp_supported = item->u.l3ca->cdp;
+
         if (cdp_enabled != NULL)
                 *cdp_enabled = item->u.l3ca->cdp_on;
+
         return ret;
+}
+
+int
+pqos_l2ca_cdp_enabled(const struct pqos_cap *cap,
+                      int *cdp_supported,
+                      int *cdp_enabled)
+{
+        const struct pqos_capability *l2ca = NULL;
+        int ret = PQOS_RETVAL_OK;
+
+        ASSERT(cap != NULL && (cdp_enabled != NULL || cdp_supported != NULL));
+        if (cap == NULL || (cdp_enabled == NULL && cdp_supported == NULL))
+                return PQOS_RETVAL_PARAM;
+
+        ret = pqos_cap_get_type(cap, PQOS_CAP_TYPE_L2CA, &l2ca);
+        if (ret != PQOS_RETVAL_OK)
+                return ret;                          /**< no L2CA capability */
+
+        ASSERT(l2ca != NULL);
+        if (cdp_supported != NULL)
+                *cdp_supported = l2ca->u.l2ca->cdp;
+
+        if (cdp_enabled != NULL)
+                *cdp_enabled = l2ca->u.l2ca->cdp_on;
+
+        return ret;
+}
+
+int
+pqos_mba_ctrl_enabled(const struct pqos_cap *cap,
+                      int *ctrl_supported,
+                      int *ctrl_enabled)
+{
+        const struct pqos_capability *mba_cap = NULL;
+        int ret = PQOS_RETVAL_OK;
+
+        ASSERT(cap != NULL && (ctrl_supported != NULL || ctrl_enabled != NULL));
+        if (cap == NULL || (ctrl_supported == NULL && ctrl_enabled == NULL))
+                return PQOS_RETVAL_PARAM;
+
+        ret = pqos_cap_get_type(cap, PQOS_CAP_TYPE_MBA, &mba_cap);
+        if (ret != PQOS_RETVAL_OK)
+                return ret;                           /**< no MBA capability */
+
+        ASSERT(mba_cap != NULL);
+        if (ctrl_supported != NULL)
+                *ctrl_supported = mba_cap->u.mba->ctrl;
+
+        if (ctrl_enabled != NULL)
+                *ctrl_enabled = mba_cap->u.mba->ctrl_on;
+
+        return PQOS_RETVAL_OK;
 }

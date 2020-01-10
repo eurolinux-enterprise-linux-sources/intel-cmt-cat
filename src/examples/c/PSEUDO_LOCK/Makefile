@@ -4,7 +4,7 @@
 # @par
 # BSD LICENSE
 #
-# Copyright(c) 2016 Intel Corporation. All rights reserved.
+# Copyright(c) 2016-2019 Intel Corporation. All rights reserved.
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -36,14 +36,14 @@
 ###############################################################################
 
 LIBDIR ?= ../../../lib
-LDFLAGS = -L$(LIBDIR)
+LDFLAGS = -L$(LIBDIR) -pie -z noexecstack -z relro -z now
 LDLIBS = -lpqos -lrt -lpthread
 CFLAGS = -I$(LIBDIR) \
 	-W -Wall -Wextra -Wstrict-prototypes -Wmissing-prototypes \
 	-Wmissing-declarations -Wold-style-definition -Wpointer-arith \
 	-Wcast-qual -Wundef -Wwrite-strings  \
-        -Wformat -Wformat-security -fstack-protector -fPIE -D_FORTIFY_SOURCE=2 \
-        -Wunreachable-code -Wmissing-noreturn -Wsign-compare -Wno-endif-labels \
+	-Wformat -Wformat-security -fstack-protector -fPIE -D_FORTIFY_SOURCE=2 \
+	-Wunreachable-code -Wsign-compare -Wno-endif-labels \
 	-g -O2
 ifneq ($(EXTRA_CFLAGS),)
 CFLAGS += $(EXTRA_CFLAGS)
@@ -52,7 +52,9 @@ endif
 # ICC and GCC options
 ifeq ($(CC),icc)
 else
-CFLAGS += -Wcast-align -Wnested-externs
+CFLAGS += -Wcast-align \
+    -Wnested-externs \
+    -Wmissing-noreturn
 endif
 
 # Build targets and dependencies

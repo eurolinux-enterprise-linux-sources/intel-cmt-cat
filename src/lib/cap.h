@@ -1,7 +1,7 @@
 /*
  * BSD LICENSE
  *
- * Copyright(c) 2014-2016 Intel Corporation. All rights reserved.
+ * Copyright(c) 2014-2019 Intel Corporation. All rights reserved.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -43,16 +43,37 @@
 extern "C" {
 #endif
 
+#include "pqos.h"
+
 /**
  * @brief Modifies L3 CAT capability structure upon CDP config change
  *
  * Limited error checks done in this function and no errors reported.
  * It is up to caller to check for L3 CAT & CDP support.
  *
- * @param [in] prev old CDP setting
- * @param [in] next new CDP setting
+ * @param [in] cdp L3 cdp configuration
  */
-void _pqos_cap_l3cdp_change(const int prev, const int next);
+void _pqos_cap_l3cdp_change(const enum pqos_cdp_config cdp);
+
+/**
+ * @brief Modifies L2 CAT capability structure upon CDP config change
+ *
+ * Limited error checks done in this function and no errors reported.
+ * It is up to caller to check for L2 CAT & CDP support.
+ *
+ * @param [in] cdp L2 cdp configuration
+ */
+void _pqos_cap_l2cdp_change(const enum pqos_cdp_config cdp);
+
+/**
+ * @brief Modifies MBA capability structure upon MBA CTRL config change
+ *
+ * Limited error checks done in this function and no errors reported.
+ * It is up to caller to check for MBA & CTRL support.
+ *
+ * @param [in] cfg MBA CTRL configuration
+ */
+void _pqos_cap_mba_change(const enum pqos_mba_config cfg);
 
 /**
  * @brief Aquires lock for PQoS API use
@@ -77,6 +98,27 @@ void _pqos_api_unlock(void);
  * @retval PQOS_RETVA_ERROR state different than expected
  */
 int _pqos_check_init(const int expect);
+
+/**
+ * @brief Internal API to retrie PQoS capabilities data
+ *
+ * @param [out] cap location to store PQoS capabilities information at
+ * @param [out] cpu location to store CPU information at
+ */
+void _pqos_cap_get(const struct pqos_cap **cap,
+                   const struct pqos_cpuinfo **cpu);
+
+/**
+ * @brief Internal API to retrie \a type of capability
+ *
+ * @param [in] type capability type to look for
+ * @param [out] cap_item place to store pointer to selected capability
+ *
+ * @return Operation status
+ * @retval PQOS_RETVAL_OK on success
+ */
+int _pqos_cap_get_type(const enum pqos_cap_type type,
+                       const struct pqos_capability **cap_item);
 
 #ifdef __cplusplus
 }

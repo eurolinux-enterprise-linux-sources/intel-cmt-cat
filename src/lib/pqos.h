@@ -1,7 +1,7 @@
 /*
  * BSD LICENSE
  *
- * Copyright(c) 2014-2017 Intel Corporation. All rights reserved.
+ * Copyright(c) 2014-2019 Intel Corporation. All rights reserved.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -57,7 +57,7 @@ extern "C" {
  * =======================================
  */
 
-#define PQOS_VERSION       106          /**< version 1.06 */
+#define PQOS_VERSION       30001        /**< version 3.0.1 */
 #define PQOS_MAX_L3CA_COS  16           /**< 16 x COS */
 #define PQOS_MAX_L2CA_COS  16           /**< 16 x COS */
 
@@ -73,6 +73,19 @@ extern "C" {
 #define PQOS_RETVAL_INIT         4      /**< initialization error */
 #define PQOS_RETVAL_TRANSPORT    5      /**< transport error */
 #define PQOS_RETVAL_PERF_CTR     6      /**< performance counter error */
+#define PQOS_RETVAL_BUSY         7      /**< resource busy error */
+#define PQOS_RETVAL_INTER        8      /**< Interface not supported */
+
+/*
+ * =======================================
+ * Interface values
+ * =======================================
+ */
+enum pqos_interface {
+        PQOS_INTER_MSR            = 0,  /**< MSR */
+        PQOS_INTER_OS             = 1,  /**< OS */
+        PQOS_INTER_OS_RESCTRL_MON = 2   /**< OS with resctrl monitoring */
+};
 
 /*
  * =======================================
@@ -105,12 +118,20 @@ enum pqos_cdp_config {
  *         LOG_VER_DEFAULT        - warning and error messages
  *         LOG_VER_VERBOSE        - warning, error and info messages
  *         LOG_VER_SUPER_VERBOSE  - warning, error, info and debug messages
+ *
+ * @param interface preference
+ *         PQOS_INTER_MSR            - MSR interface or nothing
+ *         PQOS_INTER_OS             - OS interface or nothing
+ *         PQOS_INTER_OS_RESCTRL_MON - OS interface with resctrl monitoring
+ *                                     or nothing
  */
 struct pqos_config {
         int fd_log;
-        void (*callback_log)(void *, const size_t, const char *);
+        void (*callback_log)(void *context, const size_t size,
+                             const char *message);
         void *context_log;
         int verbose;
+        enum pqos_interface interface;
 };
 
 /**
@@ -122,6 +143,8 @@ struct pqos_config {
  *
  * @return Operation status
  * @retval PQOS_RETVAL_OK on success
+ * @note   If you require system wide interface enforcement you can do so by
+ *         setting the "RDT_IFACE" environment variable.
  */
 int pqos_init(const struct pqos_config *config);
 
@@ -166,9 +189,9 @@ struct pqos_cap_l3ca {
         unsigned way_size;              /**< way size in bytes */
         uint64_t way_contention;        /**< ways contention bit mask */
         int cdp;                        /**< code data prioritization feature
-                                           presence */
+                                           support */
         int cdp_on;                     /**< code data prioritization on or
-                                           off*/
+                                           off */
 };
 
 /**
@@ -180,6 +203,21 @@ struct pqos_cap_l2ca {
         unsigned num_ways;              /**< number of cache ways */
         unsigned way_size;              /**< way size in bytes */
         uint64_t way_contention;        /**< ways contention bit mask */
+        int cdp;                        /**< code data prioritization feature
+                                           support */
+        int cdp_on;                     /**< code data prioritization on or
+                                           off */
+};
+
+/**
+ * Memory Bandwidth Allocation configuration enumeration
+ */
+enum pqos_mba_config {
+        PQOS_MBA_ANY,                   /**< currently enabled configuration */
+        PQOS_MBA_DEFAULT,               /**< direct MBA hardware
+                                           configuration (percentage) */
+        PQOS_MBA_CTRL                   /**< MBA controller configuration
+                                           (MBps) */
 };
 
 /**
@@ -191,6 +229,8 @@ struct pqos_cap_mba {
         unsigned throttle_max;          /**< the max MBA can be throttled */
         unsigned throttle_step;         /**< MBA granularity */
         int is_linear;                  /**< the type of MBA linear/nonlinear */
+        int ctrl;                       /**< MBA controller support */
+        int ctrl_on;                    /**< MBA controller enabled */
 };
 
 /**
@@ -203,6 +243,8 @@ enum pqos_mon_event {
         PQOS_MON_EVENT_TMEM_BW = 4,     /**< Total memory bandwidth */
         PQOS_MON_EVENT_RMEM_BW = 8,     /**< Remote memory bandwidth
                                            (virtual event) */
+        RESERVED1 = 0x1000,
+        RESERVED2 = 0x2000,
         PQOS_PERF_EVENT_LLC_MISS = 0x4000, /**< LLC misses */
         PQOS_PERF_EVENT_IPC    = 0x8000, /**< instructions per clock */
 };
@@ -224,8 +266,6 @@ struct pqos_monitor {
                                            this event */
         uint32_t scale_factor;          /**< factor to scale RMID value
                                            to bytes */
-        unsigned pid_support;           /**< flag to show if PID monitoring
-                                           is supported */
 };
 
 struct pqos_cap_mon {
@@ -352,6 +392,18 @@ struct pqos_mon_poll_ctx {
 };
 
 /**
+ * Perf monitoring poll context
+ */
+struct pqos_mon_perf_ctx {
+        int fd_llc;
+        int fd_mbl;
+        int fd_mbt;
+        int fd_inst;
+        int fd_cyc;
+        int fd_llc_misses;
+};
+
+/**
  * Monitoring group data structure
  */
 struct pqos_mon_data {
@@ -364,18 +416,30 @@ struct pqos_mon_data {
                                            pointer */
         struct pqos_event_values values; /**< RMID events value */
 
-        pid_t pid; /**< if not zero then this group tracks a process */
-
         /**
          * Task specific section
          */
-        int tid_nr;
+        unsigned num_pids;              /**< number of pids in the group */
+        pid_t *pids;                    /**< list of pids in the group */
+        unsigned tid_nr;
         pid_t *tid_map;
-        int *fds_llc;
-        int *fds_mbl;
-        int *fds_mbt;
-        int **fds_ipc;
-        int **fds_misses;
+
+        /**
+         * Perf specific section
+         */
+        struct pqos_mon_perf_ctx *perf; /**< Perf poll context for each
+                                           core/tid */
+        enum pqos_mon_event perf_event; /**< Started perf events */
+
+        /**
+         * Resctrl specific section
+         */
+        enum pqos_mon_event resctrl_event;
+        char *resctrl_mon_group;
+        struct pqos_event_values resctrl_values_storage; /**< stores values
+                                                         of monitoring group
+                                                         that was moved to
+                                                         another COS */
 
         /**
          * Core specific section
@@ -425,6 +489,9 @@ int pqos_mon_assoc_get(const unsigned lcore,
  *
  * @return Operations status
  * @retval PQOS_RETVAL_OK on success
+ *
+ * @note As of Kernel 4.10, Intel(R) RDT perf results per core are found to
+ *       be incorrect.
  */
 int pqos_mon_start(const unsigned num_cores,
                    const unsigned *cores,
@@ -448,6 +515,53 @@ int pqos_mon_start_pid(const pid_t pid,
                        const enum pqos_mon_event event,
                        void *context,
                        struct pqos_mon_data *group);
+
+/**
+ * @brief Starts resource monitoring of selected \a pids (processes)
+ *
+ * @param [in] num_pids number of pids in \a pids array
+ * @param [in] pids array of process ID
+ * @param [in] event monitoring event id
+ * @param [in] context a pointer for application's convenience
+ *             (unused by the library)
+ * @param [in,out] group a pointer to monitoring structure
+ *
+ * @return Operations status
+ * @retval PQOS_RETVAL_OK on success
+ */
+int pqos_mon_start_pids(const unsigned num_pids,
+                        const pid_t *pids,
+                        const enum pqos_mon_event event,
+                        void *context,
+                        struct pqos_mon_data *group);
+
+/**
+ * @brief Adds pids to the resource monitoring grpup
+ *
+ * @param [in] num_pids number of pids in \a pids array
+ * @param [in] pids array of process ID
+ * @param [in,out] group a pointer to monitoring structure
+ *
+ * @return Operations status
+ * @retval PQOS_RETVAL_OK on success
+ */
+int pqos_mon_add_pids(const unsigned num_pids,
+                      const pid_t *pids,
+                      struct pqos_mon_data *group);
+
+/**
+ * @brief Remove pids from the resource monitoring grpup
+ *
+ * @param [in] num_pids number of pids in \a pids array
+ * @param [in] pids array of process ID
+ * @param [in,out] group a pointer to monitoring structure
+ *
+ * @return Operations status
+ * @retval PQOS_RETVAL_OK on success
+ */
+int pqos_mon_remove_pids(const unsigned num_pids,
+                         const pid_t *pids,
+                         struct pqos_mon_data *group);
 
 /**
  * @brief Stops resource monitoring data for selected monitoring group
@@ -501,6 +615,32 @@ int pqos_alloc_assoc_get(const unsigned lcore,
                          unsigned *class_id);
 
 /**
+ * @brief OS interface to associate \a task
+ *        with given class of service
+ *
+ * @param [in] task task ID to be associated
+ * @param [in] class_id class of service
+ *
+ * @return Operations status
+ * @retval PQOS_RETVAL_OK on success
+ */
+int pqos_alloc_assoc_set_pid(const pid_t task,
+                             const unsigned class_id);
+
+/**
+ * @brief OS interface to read association
+ *        of \a task with class of service
+ *
+ * @param [in] task ID to find association
+ * @param [out] class_id class of service
+ *
+ * @return Operations status
+ * @retval PQOS_RETVAL_OK on success
+ */
+int pqos_alloc_assoc_get_pid(const pid_t task,
+                             unsigned *class_id);
+
+/**
  * @brief Assign first available COS to cores in \a core_array
  *
  * While searching for available COS take technologies it is intended to use
@@ -509,6 +649,7 @@ int pqos_alloc_assoc_get(const unsigned lcore,
  * - if L2 CAT technology is requested then cores need to belong to
  *   one L2 cluster (same L2ID)
  * - if only L3 CAT is requested then cores need to belong to one socket
+ * - if only MBA is selected then cores need to belong to one socket
  *
  * @param [in] technology bit mask selecting technologies
  *             (1 << enum pqos_cap_type)
@@ -535,22 +676,63 @@ int pqos_alloc_release(const unsigned *core_array,
                        const unsigned core_num);
 
 /**
- * @brief Resets configuration of cache allocation technology
+ * @brief Assign first available COS to tasks in \a task_array
+ *        Searches all COS directories from highest to lowest
  *
- * Reverts CAT state to the one after reset:
+ * While searching for available COS take technologies it is intended to use
+ * with into account.
+ * Note on \a technology parameter:
+ * - this parameter is currently reserved for future use
+ * - resctrl (Linux interface) will only provide the highest class id common
+ *   to all supported technologies
+ *
+ * @param [in] technology bit mask selecting technologies
+ *             (1 << enum pqos_cap_type)
+ * @param [in] task_array list of task ids
+ * @param [in] task_num number of task ids in the \a task_array
+ * @param [out] class_id place to store reserved COS id
+ *
+ * @return Operations status
+ * @retval PQOS_RETVAL_OK on success
+ */
+int pqos_alloc_assign_pid(const unsigned technology,
+                          const pid_t *task_array,
+                          const unsigned task_num,
+                          unsigned *class_id);
+
+/**
+ * @brief Reassign tasks in \a task_array to default COS#0
+ *
+ * @param [in] task_array list of task ids
+ * @param [in] task_num number of task ids in the \a task_array
+ *
+ * @return Operations status
+ * @retval PQOS_RETVAL_OK on success
+ */
+int pqos_alloc_release_pid(const pid_t *task_array,
+                           const unsigned task_num);
+
+/**
+ * @brief Resets configuration of allocation technologies
+ *
+ * Reverts CAT/MBA state to the one after reset:
  * - all cores associated with COS0
- * - all COS are set to give access to all cache ways
+ * - all COS are set to give access to entire resource
  *
- * As part of CAT reset CDP reconfiguration can be performed.
- * This can be requested via \a l3_cdp_cfg.
+ * As part of allocation reset CDP reconfiguration can be performed.
+ * This can be requested via \a l3_cdp_cfg, \a l2_cdp_cfg and \a mba_cfg.
  *
  * @param [in] l3_cdp_cfg requested L3 CAT CDP config
+ * @param [in] l2_cdp_cfg requested L2 CAT CDP config
+ * @param [in] mba_cfg requested MBA config
  *
  * @return Operation status
  * @retval PQOS_RETVAL_OK on success
  */
 int
-pqos_alloc_reset(const enum pqos_cdp_config l3_cdp_cfg);
+pqos_alloc_reset(const enum pqos_cdp_config l3_cdp_cfg,
+                 const enum pqos_cdp_config l2_cdp_cfg,
+                 const enum pqos_mba_config mba_cfg);
 
 /*
  * =======================================
@@ -592,7 +774,7 @@ int pqos_l3ca_set(const unsigned socket,
  *
  * @param [in] socket CPU socket id
  * @param [in] max_num_ca maximum number of classes of service
- *            that can be accommodated at \a ca
+ *             that can be accommodated at \a ca
  * @param [out] num_ca number of classes of service read into \a ca
  * @param [out] ca table with read classes of service
  *
@@ -604,6 +786,19 @@ int pqos_l3ca_get(const unsigned socket,
                   unsigned *num_ca,
                   struct pqos_l3ca *ca);
 
+/**
+ * @brief Get minimum number of bits which must be set in L3 way mask when
+ *        updating a class of service
+ *
+ * @param [out] min_cbm_bits minimum number of bits that must be set
+ *
+ * @return Operational status
+ * @retval PQOS_RETVAL_OK on success
+ * @retval PQOS_RETVAL_RESOURCE if unable to determine
+ */
+int pqos_l3ca_get_min_cbm_bits(unsigned *min_cbm_bits);
+
+
 /*
  * =======================================
  * L2 cache allocation
@@ -614,8 +809,15 @@ int pqos_l3ca_get(const unsigned socket,
  * L2 cache allocation class of service data structure
  */
 struct pqos_l2ca {
-        unsigned class_id;      /**< class of service */
-        uint32_t ways_mask;     /**< bit mask for L2 cache ways */
+        unsigned class_id;              /**< class of service */
+        int cdp;                        /**< data & code masks used if true */
+        union {
+                uint64_t ways_mask;     /**< bit mask for L2 cache ways */
+                struct {
+                        uint64_t data_mask;
+                        uint64_t code_mask;
+                } s;
+        } u;
 };
 
 /**
@@ -649,6 +851,18 @@ int pqos_l2ca_get(const unsigned l2id,
                   unsigned *num_ca,
                   struct pqos_l2ca *ca);
 
+/**
+ * @brief Get minimum number of bits which must be set in L2 way mask when
+ *        updating a class of service
+ *
+ * @param [out] min_cbm_bits minimum number of bits that must be set
+ *
+ * @return Operational status
+ * @retval PQOS_RETVAL_OK on success
+ * @retval PQOS_RETVAL_RESOURCE if unable to determine
+ */
+int pqos_l2ca_get_min_cbm_bits(unsigned *min_cbm_bits);
+
 /*
  * =======================================
  * Memory Bandwidth Allocation
@@ -660,7 +874,11 @@ int pqos_l2ca_get(const unsigned l2id,
  */
 struct pqos_mba {
         unsigned class_id;      /**< class of service */
-        unsigned mb_rate;       /**< valve open rate (VOR) in percentage */
+        unsigned mb_max;        /**< maximum available bandwidth in percentage
+                                   (without MBA controller) or in MBps
+                                   (with MBA controller), depending on ctrl
+                                   flag */
+        int ctrl;               /**< MBA controller flag */
 };
 
 /**
@@ -759,6 +977,18 @@ unsigned *
 pqos_cpu_get_cores(const struct pqos_cpuinfo *cpu,
                    const unsigned socket,
                    unsigned *count);
+
+/**
+ * @brief Retrieves task id's from resctrl task file for a given COS
+ *
+ * @param [in] class_id Class of Service ID
+ * @param [out] count place to store actual number of task id's returned
+ *
+ * @return Allocated task id array
+ * @retval NULL on error
+ */
+unsigned *
+pqos_pid_get_pid_assoc(const unsigned class_id, unsigned *count);
 
 /**
  * @brief Retrieves core information from cpu info structure for \a lcore
@@ -923,12 +1153,12 @@ pqos_mba_get_cos_num(const struct pqos_cap *cap,
                      unsigned *cos_num);
 
 /**
- * @brief Retrieves CDP status
+ * @brief Retrieves L3 CDP status
  *
  * @param [in] cap platform QoS capabilities structure
  *                 returned by \a pqos_cap_get
- * @param [out] cdp_supported place to store CDP support status
- * @param [out] cdp_enabled place to store CDP enable status
+ * @param [out] cdp_supported place to store L3 CDP support status
+ * @param [out] cdp_enabled place to store L3 CDP enable status
  *
  * @return Operation status
  * @retval PQOS_RETVAL_OK on success
@@ -937,6 +1167,34 @@ int
 pqos_l3ca_cdp_enabled(const struct pqos_cap *cap,
                       int *cdp_supported,
                       int *cdp_enabled);
+
+/**
+ * @brief Retrieves L2 CDP status
+ *
+ * @param [in] cap platform QoS capabilities structure
+ *                 returned by \a pqos_cap_get
+ * @param [out] cdp_supported place to store L2 CDP support status
+ * @param [out] cdp_enabled place to store L2 CDP enable status
+ *
+ * @return Operation status
+ * @retval PQOS_RETVAL_OK on success
+ */
+int
+pqos_l2ca_cdp_enabled(const struct pqos_cap *cap,
+                      int *cdp_supported,
+                      int *cdp_enabled);
+
+/**
+ * @brief Retrieves MBA controller configuration status
+ *
+ * @param [in] cap platform QoS capabilities structure
+ *                 returned by \a pqos_cap_get
+ * @param [out] ctrl_supported place to store MBA controller support status
+ * @param [out] ctrl_enabled place to store MBA controller enable status
+ *
+ */
+int pqos_mba_ctrl_enabled(const struct pqos_cap *cap, int *ctrl_supported,
+                          int *ctrl_enabled);
 
 /**
  * @brief Retrieves a monitoring value from a group for a specific event.
@@ -952,8 +1210,8 @@ pqos_mon_get_event_value(void * const value,
                          const enum pqos_mon_event event_id,
                          const struct pqos_mon_data * const group)
 {
-        uint64_t * const p_64 = value;
-        double * const p_dbl = value;
+        uint64_t * const p_64 = (uint64_t *)value;
+        double * const p_dbl = (double *)value;
 
 	if (group == NULL || value == NULL)
 		return PQOS_RETVAL_PARAM;

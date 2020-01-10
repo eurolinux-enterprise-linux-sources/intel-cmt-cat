@@ -1,7 +1,7 @@
 /*
  * BSD LICENSE
  *
- * Copyright(c) 2014-2016 Intel Corporation. All rights reserved.
+ * Copyright(c) 2014-2019 Intel Corporation. All rights reserved.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -51,11 +51,22 @@
 #include "profiles.h"
 #include "monitor.h"
 #include "alloc.h"
+#include "cap.h"
 
 /**
- * Default CDP configuration option - don't enforce on or off
+ * Default L3 CDP configuration option - don't enforce on or off
  */
 static enum pqos_cdp_config selfn_l3cdp_config = PQOS_REQUIRE_CDP_ANY;
+
+/**
+ * Default L2 CDP configuration option - don't enforce on or off
+ */
+static enum pqos_cdp_config selfn_l2cdp_config = PQOS_REQUIRE_CDP_ANY;
+
+/**
+ * Default MBA configuration option - don't enforce on or off
+ */
+static enum pqos_mba_config selfn_mba_config = PQOS_MBA_ANY;
 
 /**
  * Monitoring reset
@@ -83,14 +94,29 @@ static char *sel_allocation_profile = NULL;
 static int sel_verbose_mode = 0;
 
 /**
- * Reset CAT configuration
+ * Reset allocation configuration
  */
-static int sel_reset_CAT = 0;
+static int sel_reset_alloc = 0;
 
 /**
  * Enable showing cache allocation settings
  */
 static int sel_show_allocation_config = 0;
+
+/**
+ * Enable displaying supported RDT capabilities
+ */
+static int sel_display = 0;
+
+/**
+ * Enable displaying supported RDT capabilities in verbose mode
+ */
+static int sel_display_verbose = 0;
+
+/**
+ * Selected library interface
+ */
+enum pqos_interface sel_interface = PQOS_INTER_MSR;
 
 /**
  * @brief Function to check if a value is already contained in a table
@@ -280,35 +306,81 @@ selfn_super_verbose_mode(const char *arg)
 }
 
 /**
- * @brief Sets CAT reset flag
+ * @brief Sets allocation reset flag
  *
  * @param [in] arg optional configuration string
  *             if NULL or zero length  then configuration check is skipped
  */
-static void selfn_reset_cat(const char *arg)
+static void selfn_reset_alloc(const char *arg)
 {
-        if (arg != NULL && (strlen(arg) > 0)) {
+        if (arg != NULL && *arg != '\0') {
+                unsigned i;
+                char *tok = NULL;
+                char *saveptr = NULL;
+                char *s = NULL;
+
+                selfn_strdup(&s, arg);
+
                 const struct {
                         const char *name;
                         enum pqos_cdp_config cdp;
-                } patterns[] = {
+                } patternsl3[] = {
                         {"l3cdp-on",  PQOS_REQUIRE_CDP_ON},
                         {"l3cdp-off", PQOS_REQUIRE_CDP_OFF},
                         {"l3cdp-any", PQOS_REQUIRE_CDP_ANY},
+                }, patternsl2[] = {
+                        {"l2cdp-on",  PQOS_REQUIRE_CDP_ON},
+                        {"l2cdp-off", PQOS_REQUIRE_CDP_OFF},
+                        {"l2cdp-any", PQOS_REQUIRE_CDP_ANY},
                 };
-                unsigned i;
 
-                for (i = 0; i < DIM(patterns); i++)
-                        if (strcasecmp(arg, patterns[i].name) == 0)
-                                break;
+                const struct {
+                        const char *name;
+                        enum pqos_mba_config mba;
+                } patternsmb[] = {
+                        {"mbaCtrl-on", PQOS_MBA_CTRL},
+                        {"mbaCtrl-off", PQOS_MBA_DEFAULT},
+                        {"mbaCtrl-any", PQOS_MBA_ANY},
+                };
 
-                if (i >= DIM(patterns)) {
-                        printf("Unrecognized '%s' CAT reset option!\n", arg);
-                        exit(EXIT_FAILURE);
+                tok = s;
+                while ((tok = strtok_r(tok, ",", &saveptr)) != NULL) {
+                        unsigned valid = 0;
+
+                        for (i = 0; i < DIM(patternsl3); i++)
+                                if (strcasecmp(tok, patternsl3[i].name) == 0) {
+                                        selfn_l3cdp_config = patternsl3[i].cdp;
+                                        valid = 1;
+                                        break;
+                                }
+
+                        for (i = 0; i < DIM(patternsl2); i++)
+                                if (strcasecmp(tok, patternsl2[i].name) == 0) {
+                                        selfn_l2cdp_config = patternsl2[i].cdp;
+                                        valid = 1;
+                                        break;
+                                }
+
+                        for (i = 0; i < DIM(patternsmb); i++)
+                                if (strcasecmp(tok, patternsmb[i].name) == 0) {
+                                        selfn_mba_config = patternsmb[i].mba;
+                                        valid = 1;
+                                        break;
+                                }
+
+                        if (!valid) {
+                                printf("Unrecognized '%s' allocation "
+                                       "reset option!\n", tok);
+                                free(s);
+                                exit(EXIT_FAILURE);
+                        }
+
+                        tok = NULL;
                 }
-                selfn_l3cdp_config = patterns[i].cdp;
+
+                free(s);
         }
-        sel_reset_CAT = 1;
+        sel_reset_alloc = 1;
 }
 
 /**
@@ -323,6 +395,28 @@ static void selfn_show_allocation(const char *arg)
 }
 
 /**
+ * @brief Selects displaying supported capabilities
+ *
+ * @param arg not used
+ */
+static void selfn_display(const char *arg)
+{
+        UNUSED_ARG(arg);
+        sel_display = 1;
+}
+
+/**
+ * @brief Selects displaying supported capabilities in verbose mode
+ *
+ * @param arg not used
+ */
+static void selfn_display_verbose(const char *arg)
+{
+        UNUSED_ARG(arg);
+        sel_display_verbose = 1;
+}
+
+/**
  * @brief Selects allocation profile from internal DB
  *
  * @param arg string passed to -c command line option
@@ -331,6 +425,18 @@ static void
 selfn_allocation_select(const char *arg)
 {
         selfn_strdup(&sel_allocation_profile, arg);
+}
+
+/**
+ * @brief Selects library OS interface
+ *
+ * @param arg not used
+ */
+static void
+selfn_iface_os(const char *arg)
+{
+        UNUSED_ARG(arg);
+        sel_interface = PQOS_INTER_OS;
 }
 
 /**
@@ -349,6 +455,8 @@ parse_config_file(const char *fname)
                 void (*fn)(const char *);
         } optab[] = {
                 {"show-alloc:",         selfn_show_allocation },   /**< -s */
+                {"display:",            selfn_display },           /**< -d */
+                {"display-verbose:",    selfn_display_verbose },   /**< -D */
                 {"log-file:",           selfn_log_file },          /**< -l */
                 {"verbose-mode:",       selfn_verbose_mode },      /**< -v */
                 {"super-verbose-mode:", selfn_super_verbose_mode },/**< -V */
@@ -362,7 +470,8 @@ parse_config_file(const char *fname)
                 {"monitor-file:",       selfn_monitor_file },      /**< -o */
                 {"monitor-file-type:",  selfn_monitor_file_type }, /**< -u */
                 {"monitor-top-like:",   selfn_monitor_top_like },  /**< -T */
-                {"reset-cat:",          selfn_reset_cat },         /**< -R */
+                {"reset-cat:",          selfn_reset_alloc },       /**< -R */
+                {"iface-os:",           selfn_iface_os },          /**< -I */
         };
         FILE *fp = NULL;
         char cb[256];
@@ -429,10 +538,11 @@ parse_config_file(const char *fname)
 static const char *m_cmd_name = "pqos";                     /**< command name */
 static const char help_printf_short[] =
         "Usage: %s [-h] [--help] [-v] [--verbose] [-V] [--super-verbose]\n"
-        "          [-l FILE] [--log-file=FILE]\n"
+        "          [-l FILE] [--log-file=FILE] [-I] [--iface-os]\n"
         "       %s [-s] [--show]\n"
-        "       %s [-m EVTCORES] [--mon-core=EVTCORES] | [-p EVTPIDS] "
-        "[--mon-pid=EVTPIDS]\n"
+        "       %s [-d] [--display] [-D] [--display-verbose]\n"
+        "       %s [-m EVTCORES] [--mon-core=EVTCORES] | [-p [EVTPIDS]] "
+        "[--mon-pid[=EVTPIDS]]\n"
         "          [-t SECONDS] [--mon-time=SECONDS]\n"
         "          [-i N] [--mon-interval=N]\n"
         "          [-T] [--mon-top]\n"
@@ -440,7 +550,7 @@ static const char help_printf_short[] =
         "          [-u TYPE] [--mon-file-type=TYPE]\n"
         "          [-r] [--mon-reset]\n"
         "       %s [-e CLASSDEF] [--alloc-class=CLASSDEF]\n"
-        "          [-a CLASS2CORE] [--alloc-assoc=CLASS2CORE]\n"
+        "          [-a CLASS2ID] [--alloc-assoc=CLASS2ID]\n"
         "       %s [-R] [--alloc-reset]\n"
         "       %s [-H] [--profile-list] | [-c PROFILE] "
         "[--profile-set=PROFILE]\n"
@@ -452,6 +562,8 @@ static const char help_printf_long[] =
         "  -v, --verbose               verbose mode\n"
         "  -V, --super-verbose         super-verbose mode\n"
         "  -s, --show                  show current PQoS configuration\n"
+        "  -d, --display               display supported capabilities\n"
+        "  -D, --display-verbose       display supported capabilities in verbose mode\n"
         "  -f FILE, --config-file=FILE load commands from selected file\n"
         "  -l FILE, --log-file=FILE    log messages into selected file\n"
         "  -e CLASSDEF, --alloc-class=CLASSDEF\n"
@@ -459,28 +571,40 @@ static const char help_printf_long[] =
         "          CLASSDEF format is 'TYPE:ID=DEFINITION;'.\n"
         "          To specify specific resources 'TYPE[@RESOURCE_ID]:ID=DEFINITION;'.\n"
         "          Examples: 'llc:0=0xffff;llc:1=0x00ff;llc@0-1:2=0xff00',\n"
-	"                    'llc:0d=0xfff;llc:0c=0xfff00',\n"
+        "                    'llc:0d=0xfff;llc:0c=0xfff00',\n"
         "                    'l2:2=0x3f;l2@2:1=0xf',\n"
-        "                    'mba:1=30;mba@1:3=80'.\n"
-        "  -a CLASS2CORE, --alloc-assoc=CLASS2CORE\n"
-        "          associate cores with an allocation class.\n"
-        "          CLASS2CORE format is 'TYPE:ID=CORE_LIST'.\n"
+        "                    'l2:2d=0xf;l2:2c=0xc',\n"
+        "                    'mba:1=30;mba@1:3=80',\n"
+        "                    'mba_max:1=4000;mba_max@1:3=6000'.\n"
+        "  -a CLASS2ID, --alloc-assoc=CLASS2ID\n"
+        "          associate cores/tasks with an allocation class.\n"
+        "          CLASS2ID format is 'TYPE:ID=CORE_LIST/TASK_LIST'.\n"
         "          Example 'llc:0=0,2,4,6-10;llc:1=1'.\n"
-        "  -R [CONFIG], --alloc-reset[=CONFIG]\n"
-        "          reset allocation configuration (L2/L3 CAT)\n"
-        "          CONFIG can be: l3cdp-on, l3cdp-off or l3cdp-any (default).\n"
+        "          Example 'core:0=0,2,4,6-10;core:1=1'.\n"
+        "          Example 'pid:0=3543,7643,4556;pid:1=7644'.\n"
+        "  -R [CONFIG[,CONFIG]], --alloc-reset[=CONFIG[,CONFIG]]\n"
+        "          reset allocation configuration (L2/L3 CAT & MBA)\n"
+        "          CONFIG can be: l3cdp-on, l3cdp-off, l3cdp-any,\n"
+        "                         l2cdp-on, l2cdp-off, l2cdp-any,\n"
+        "                         mbaCtrl-on, mbaCtrl-off, mbaCtrl-any\n"
+        "          (default l3cdp-any,l2cdp-any,mbaCtrl-any).\n"
         "  -m EVTCORES, --mon-core=EVTCORES\n"
         "          select cores and events for monitoring.\n"
         "          EVTCORES format is 'EVENT:CORE_LIST'.\n"
         "          Example: \"all:0,2,4-10;llc:1,3;mbr:11-12\".\n"
         "          Cores can be grouped by enclosing them in square brackets,\n"
         "          example: \"llc:[0-3];all:[4,5,6];mbr:[0-3],7,8\".\n"
-        "  -p EVTPIDS, --mon-pid=EVTPIDS\n"
-        "          select process ids and events to monitor.\n"
+        "  -p [EVTPIDS], --mon-pid[=EVTPIDS]\n"
+        "          select top 10 most active (CPU utilizing) process ids to monitor\n"
+        "          or select process ids and events to monitor.\n"
         "          EVTPIDS format is 'EVENT:PID_LIST'.\n"
-        "          Example 'llc:22,25673' or 'all:892,4588-4592'.\n"
-        "          Note: processes and cores cannot be monitored together.\n"
-        "                Requires Linux and kernel versions 4.1 and newer.\n"
+        "          Examples: 'llc:22,25673' or 'all:892,4588-4592'\n"
+        "          Process' IDs can be grouped by enclosing them in square brackets,\n"
+        "          Examples: 'llc:[22,25673]' or 'all:892,[4588-4592]'\n"
+        "          Note:\n"
+        "               Requires Linux and kernel versions 4.10 and newer.\n"
+        "               The -I option must be used for PID monitoring.\n"
+        "               Processes and cores cannot be monitored together.\n"
         "  -o FILE, --mon-file=FILE    output monitored data in a FILE\n"
         "  -u TYPE, --mon-file-type=TYPE\n"
         "          select output file format type for monitored data.\n"
@@ -495,7 +619,11 @@ static const char help_printf_long[] =
         "  -H, --profile-list          list supported allocation profiles\n"
         "  -c PROFILE, --profile-set=PROFILE\n"
         "          select a PROFILE of predefined allocation classes.\n"
-        "          Use -H to list available profiles.\n";
+        "          Use -H to list available profiles.\n"
+        "  -I, --iface-os\n"
+        "          set the library interface to use the kernel\n"
+        "          implementation. If not set the default implementation is\n"
+        "          to program the MSR's directly.\n";
 
 /**
  * @brief Displays help information
@@ -506,32 +634,35 @@ static const char help_printf_long[] =
 static void print_help(const int is_long)
 {
         printf(help_printf_short,
-               m_cmd_name, m_cmd_name, m_cmd_name, m_cmd_name,
+               m_cmd_name, m_cmd_name, m_cmd_name, m_cmd_name, m_cmd_name,
                m_cmd_name, m_cmd_name, m_cmd_name);
         if (is_long)
-                printf(help_printf_long);
+                printf("%s", help_printf_long);
 }
 
 static struct option long_cmd_opts[] = {
-        {"help",          no_argument,       0, 'h'},
-        {"log-file",      required_argument, 0, 'l'},
-        {"config-file",   required_argument, 0, 'f'},
-        {"show",          no_argument,       0, 's'},
-        {"profile-list",  no_argument,       0, 'H'},
-        {"profile-set",   required_argument, 0, 'c'},
-        {"mon-interval",  required_argument, 0, 'i'},
-        {"mon-pid",       required_argument, 0, 'p'},
-        {"mon-core",      required_argument, 0, 'm'},
-        {"mon-time",      required_argument, 0, 't'},
-        {"mon-top",       no_argument,       0, 'T'},
-        {"mon-file",      required_argument, 0, 'o'},
-        {"mon-file-type", required_argument, 0, 'u'},
-        {"mon-reset",     no_argument,       0, 'r'},
-        {"alloc-class",   required_argument, 0, 'e'},
-        {"alloc-reset",   required_argument, 0, 'R'},
-        {"alloc-assoc",   required_argument, 0, 'a'},
-        {"verbose",       no_argument,       0, 'v'},
-        {"super-verbose", no_argument,       0, 'V'},
+        {"help",            no_argument,       0, 'h'},
+        {"log-file",        required_argument, 0, 'l'},
+        {"config-file",     required_argument, 0, 'f'},
+        {"show",            no_argument,       0, 's'},
+        {"display",         no_argument,       0, 'd'},
+        {"display-verbose", no_argument,       0, 'D'},
+        {"profile-list",    no_argument,       0, 'H'},
+        {"profile-set",     required_argument, 0, 'c'},
+        {"mon-interval",    required_argument, 0, 'i'},
+        {"mon-pid",         required_argument, 0, 'p'},
+        {"mon-core",        required_argument, 0, 'm'},
+        {"mon-time",        required_argument, 0, 't'},
+        {"mon-top",         no_argument,       0, 'T'},
+        {"mon-file",        required_argument, 0, 'o'},
+        {"mon-file-type",   required_argument, 0, 'u'},
+        {"mon-reset",       no_argument,       0, 'r'},
+        {"alloc-class",     required_argument, 0, 'e'},
+        {"alloc-reset",     required_argument, 0, 'R'},
+        {"alloc-assoc",     required_argument, 0, 'a'},
+        {"verbose",         no_argument,       0, 'v'},
+        {"super-verbose",   no_argument,       0, 'V'},
+        {"iface-os",        no_argument,       0, 'I'},
         {0, 0, 0, 0} /* end */
 };
 
@@ -544,13 +675,15 @@ int main(int argc, char **argv)
                 *cap_l2ca = NULL, *cap_mba = NULL;
         unsigned sock_count, *sockets = NULL;
         int cmd, ret, exit_val = EXIT_SUCCESS;
-        int opt_index = 0;
+        int opt_index = 0, pid_flag = 0;
 
         m_cmd_name = argv[0];
         print_warning();
 
+        memset(&cfg, 0, sizeof(cfg));
+
         while ((cmd = getopt_long(argc, argv,
-                                  ":Hhf:i:m:Tt:l:o:u:e:c:a:p:srvVR:",
+                                  ":Hhf:i:m:Tt:l:o:u:e:c:a:p:sdDrvVIR:",
                                   long_cmd_opts, &opt_index)) != -1) {
                 switch (cmd) {
                 case 'h':
@@ -572,7 +705,21 @@ int main(int argc, char **argv)
                         selfn_monitor_interval(optarg);
                         break;
                 case 'p':
-		        selfn_monitor_pids(optarg);
+                        if (optarg != NULL && *optarg == '-') {
+                                /**
+                                 * Next switch option wrongly assumed to be
+                                 * argument to '-p'.
+                                 * In order to fix it, we are handling this as
+                                 * '-p' without parameters (as it should be)
+                                 * to start top-pids monitoring mode.
+                                 * Have to rewind \a optind as well.
+                                 */
+                                selfn_monitor_top_pids();
+                                optind--;
+                                break;
+                        }
+                        selfn_monitor_pids(optarg);
+                        pid_flag = 1;
                         break;
                 case 'm':
                         selfn_monitor_cores(optarg);
@@ -599,36 +746,47 @@ int main(int argc, char **argv)
                         sel_mon_reset = 1;
                         break;
                 case 'R':
-                        if (optarg != NULL && *optarg == '-') {
-                                /**
-                                 * Next switch option wrongly assumed to be
-                                 * argument to '-R'.
-                                 * Pass NULL as argument to '-R' function and
-                                 * rewind \a optind.
-                                 */
-                                selfn_reset_cat(NULL);
-                                optind--;
-                        } else {
-                                selfn_reset_cat(optarg);
-                        }
+                        if (optarg != NULL) {
+                                if (*optarg == '-') {
+                                        /**
+                                         * Next switch option wrongly assumed
+                                         * to be argument to '-R'.
+                                         * Pass NULL as argument to
+                                         * '-R' function and rewind \a optind.
+                                         */
+                                        selfn_reset_alloc(NULL);
+                                        optind--;
+                                } else
+                                        selfn_reset_alloc(optarg);
+                        } else
+                                selfn_reset_alloc(NULL);
                         break;
                 case ':':
                         /**
                          * This is handler for missing mandatory argument
                          * (enabled by leading ':' in getopt() argument).
-                         * -R is only allowed switch for optional argument.
+                         * -R and -p are only allowed switch for optional args.
                          * Other switches need to report error.
                          */
-                        if (optopt != 'R') {
+                        if (optopt == 'R') {
+                                selfn_reset_alloc(NULL);
+                        } else if (optopt == 'p') {
+                                /**
+                                 * Top pids mode - in case of '-I -p' top N
+                                 * pids (by CPU usage) will be displayed and
+                                 * monitored for cache/mbm/misses
+                                 */
+                                selfn_monitor_top_pids();
+                                pid_flag = 1;
+                        } else {
                                 printf("Option -%c is missing required "
                                        "argument\n", optopt);
                                 return EXIT_FAILURE;
-                        } else {
-                                selfn_reset_cat(NULL);
                         }
                         break;
                 case 'a':
                         selfn_allocation_assoc(optarg);
+                        pid_flag |= alloc_pid_flag;
                         break;
                 case 'c':
                         selfn_allocation_select(optarg);
@@ -636,11 +794,20 @@ int main(int argc, char **argv)
                 case 's':
                         selfn_show_allocation(NULL);
                         break;
+                case 'd':
+                        selfn_display(NULL);
+                        break;
+                case 'D':
+                        selfn_display_verbose(NULL);
+                        break;
                 case 'v':
                         selfn_verbose_mode(NULL);
                         break;
                 case 'V':
                         selfn_super_verbose_mode(NULL);
+                        break;
+                case 'I':
+                        selfn_iface_os(NULL);
                         break;
                 default:
                         printf("Unsupported option: -%c. "
@@ -654,9 +821,14 @@ int main(int argc, char **argv)
                 }
         }
 
-        memset(&cfg, 0, sizeof(cfg));
+        if (pid_flag == 1 && sel_interface == PQOS_INTER_MSR) {
+                printf("Error! OS interface option [-I] needed for PID"
+                       " operations. Please re-run with the -I option.\n");
+                exit_val = EXIT_FAILURE;
+                goto error_exit_1;
+        }
         cfg.verbose = sel_verbose_mode;
-
+        cfg.interface = sel_interface;
         /**
          * Set up file descriptor for message log
          */
@@ -668,7 +840,7 @@ int main(int argc, char **argv)
                 if (cfg.fd_log == -1) {
                         printf("Error opening %s log file!\n", sel_log_file);
                         exit_val = EXIT_FAILURE;
-                        goto error_exit_2;
+                        goto error_exit_1;
                 }
         }
 
@@ -722,7 +894,14 @@ int main(int argc, char **argv)
         }
 
         if (sel_mon_reset && cap_mon != NULL) {
-                if (pqos_mon_reset() != PQOS_RETVAL_OK) {
+                ret = pqos_mon_reset();
+                if (sel_interface != PQOS_INTER_MSR &&
+                    ret == PQOS_RETVAL_RESOURCE) {
+                        exit_val = EXIT_FAILURE;
+                        printf("Monitoring cannot be reset on systems "
+                               "without resctrl monitoring capability. "
+                               "Required kernel version 4.14 or newer.\n");
+                } else if (ret != PQOS_RETVAL_OK) {
                         exit_val = EXIT_FAILURE;
                         printf("CMT/MBM reset failed!\n");
                 } else {
@@ -730,15 +909,18 @@ int main(int argc, char **argv)
                 }
         }
 
-        if (sel_reset_CAT) {
+        if (sel_reset_alloc) {
                 /**
-                 * Reset CAT configuration to after-reset state and exit
+                 * Reset allocation configuration to after-reset state and exit
                  */
-                if (pqos_alloc_reset(selfn_l3cdp_config) != PQOS_RETVAL_OK) {
+                ret = pqos_alloc_reset(selfn_l3cdp_config,
+                                       selfn_l2cdp_config,
+                                       selfn_mba_config);
+                if (ret != PQOS_RETVAL_OK) {
                         exit_val = EXIT_FAILURE;
-                        printf("CAT reset failed!\n");
+                        printf("Allocation reset failed!\n");
                 } else
-                        printf("CAT reset successful\n");
+                        printf("Allocation reset successful\n");
         }
 
         if (sel_show_allocation_config) {
@@ -746,7 +928,16 @@ int main(int argc, char **argv)
                  * Show info about allocation config and exit
                  */
 		alloc_print_config(cap_mon, cap_l3ca, cap_l2ca, cap_mba,
-                                   sock_count, sockets, p_cpu);
+                                   sock_count, sockets, p_cpu,
+                                   sel_verbose_mode);
+                goto allocation_exit;
+        }
+
+        if (sel_display || sel_display_verbose) {
+                /**
+                 * Display info about supported capabilities
+                 */
+                cap_print_features(p_cap, p_cpu, sel_display_verbose);
                 goto allocation_exit;
         }
 
@@ -757,7 +948,7 @@ int main(int argc, char **argv)
                 }
         }
 
-        switch (alloc_apply(cap_l3ca, cap_l2ca, p_cpu)) {
+        switch (alloc_apply(cap_l3ca, cap_l2ca, cap_mba, p_cpu)) {
         case 0: /* nothing to apply */
                 break;
         case 1: /* new allocation config applied and all is good */
@@ -773,7 +964,7 @@ int main(int argc, char **argv)
         /**
          * If -R was present ignore all monitoring related options
          */
-        if (sel_reset_CAT)
+        if (sel_reset_alloc)
                 goto allocation_exit;
 
         /**

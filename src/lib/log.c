@@ -1,7 +1,7 @@
 /*
  * BSD LICENSE
  *
- * Copyright(c) 2014-2016 Intel Corporation. All rights reserved.
+ * Copyright(c) 2014-2019 Intel Corporation. All rights reserved.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -41,9 +41,6 @@
 #include <stdarg.h>
 #include <string.h>
 #include <unistd.h>
-#ifdef __linux__
-#include <error.h>
-#endif /* __linux__ */
 #include <errno.h>
 
 #include "types.h"
@@ -123,7 +120,8 @@ log_init(int fd_log, void (*callback_log)(void *, const size_t, const char *),
         return LOG_RETVAL_OK;
 }
 
-int log_fini(void)
+int
+log_fini(void)
 {
 	if (m_opt == LOG_OPT_SILENT) {
                 log_init_successful = 0;
@@ -139,7 +137,8 @@ int log_fini(void)
         return LOG_RETVAL_OK;
 }
 
-void log_printf(int type, const char *str, ...)
+void
+log_printf(int type, const char *str, ...)
 {
         va_list ap;
 	char ap_buffer[AP_BUFFER_SIZE];

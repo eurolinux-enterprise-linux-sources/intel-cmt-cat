@@ -1,7 +1,7 @@
 /*
  * BSD LICENSE
  *
- * Copyright(c) 2014-2016 Intel Corporation. All rights reserved.
+ * Copyright(c) 2014-2019 Intel Corporation. All rights reserved.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -53,6 +53,13 @@ extern "C" {
  * @param arg argument passed to -p command line option
  */
 void selfn_monitor_pids(const char *arg);
+
+/**
+ * @brief Looks for processes with highest CPU usage on the system and
+ *        starts monitoring for them. Processes are displayed and sorted
+ *        afterwards by LLC occupancy
+ */
+void selfn_monitor_top_pids(void);
 
 /**
  * @brief Selects top-like monitoring format

@@ -1,7 +1,7 @@
 /*
  * BSD LICENSE
  *
- * Copyright(c) 2014-2017 Intel Corporation. All rights reserved.
+ * Copyright(c) 2014-2019 Intel Corporation. All rights reserved.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -62,6 +62,7 @@
 #include "pqos.h"
 
 #include "cap.h"
+#include "os_cap.h"
 #include "allocation.h"
 #include "monitoring.h"
 
@@ -69,6 +70,10 @@
 #include "machine.h"
 #include "types.h"
 #include "log.h"
+#include "api.h"
+#include "utils.h"
+#include "resctrl.h"
+#include "perf_monitoring.h"
 
 /**
  * ---------------------------------------
@@ -86,8 +91,8 @@
 
 #define PQOS_CPUID_CAT_CDP_BIT       2       /**< CDP supported bit */
 
-#define PQOS_MSR_L3_QOS_CFG          0xC81   /**< CAT config register */
-#define PQOS_MSR_L3_QOS_CFG_CDP_EN   1ULL    /**< CDP enable bit */
+#define PQOS_MSR_L3_QOS_CFG          0xC81   /**< L3 CAT config register */
+#define PQOS_MSR_L3_QOS_CFG_CDP_EN   1ULL    /**< L3 CDP enable bit */
 
 #define PQOS_MSR_L3CA_MASK_START     0xC90   /**< L3 CAT class 0 register */
 #define PQOS_MSR_L3CA_MASK_END       0xD0F   /**< L3 CAT class 127 register */
@@ -95,6 +100,9 @@
                                                 register */
 #define PQOS_MSR_ASSOC_QECOS_SHIFT   32
 #define PQOS_MSR_ASSOC_QECOS_MASK    0xffffffff00000000ULL
+
+#define PQOS_MSR_L2_QOS_CFG          0xC82   /**< L2 CAT config register */
+#define PQOS_MSR_L2_QOS_CFG_CDP_EN   1ULL    /**< L2 CDP enable bit */
 
 #define PQOS_MSR_L2CA_MASK_START     0xC10   /**< L2 CAT class 0 register */
 #define PQOS_MSR_L2CA_MASK_END       0xD8F   /**< L2 CAT class 127 register */
@@ -104,16 +112,17 @@
 #define LOCKFILE "/var/lock/libpqos"
 #endif
 #ifdef __FreeBSD__
-#define LOCKFILE "/var/lib/libpqos.lockfile"
+#define LOCKFILE "/var/tmp/libpqos.lockfile"
 #endif
 #endif /*!LOCKFILE*/
+
+#define PROC_CPUINFO "/proc/cpuinfo"
 
 /**
  * ---------------------------------------
  * Local data types
  * ---------------------------------------
  */
-
 
 /**
  * ---------------------------------------
@@ -146,6 +155,15 @@ static int m_apilock = -1;
 static pthread_mutex_t m_apilock_mutex;
 
 /**
+ * Interface status
+ *   0  PQOS_INTER_MSR
+ *   1  PQOS_INTER_OS
+ *   2  PQOS_INTER_OS_RESCTRL_MON
+ */
+#ifdef __linux__
+static int m_interface = PQOS_INTER_MSR;
+#endif
+/**
  * ---------------------------------------
  * Functions for safe multi-threading
  * ---------------------------------------
@@ -158,7 +176,8 @@ static pthread_mutex_t m_apilock_mutex;
  * @retval 0 success
  * @retval -1 error
  */
-static int _pqos_api_init(void)
+static int
+_pqos_api_init(void)
 {
 
         const char *lock_filename = LOCKFILE;
@@ -187,7 +206,8 @@ static int _pqos_api_init(void)
  * @retval 0 success
  * @retval -1 error
  */
-static int _pqos_api_exit(void)
+static int
+_pqos_api_exit(void)
 {
         int ret = 0;
 
@@ -202,7 +222,8 @@ static int _pqos_api_exit(void)
         return ret;
 }
 
-void _pqos_api_lock(void)
+void
+_pqos_api_lock(void)
 {
         int err = 0;
 
@@ -216,7 +237,8 @@ void _pqos_api_lock(void)
                 LOG_ERROR("API lock error!\n");
 }
 
-void _pqos_api_unlock(void)
+void
+_pqos_api_unlock(void)
 {
         int err = 0;
 
@@ -236,7 +258,8 @@ void _pqos_api_unlock(void)
  * ---------------------------------------
  */
 
-int _pqos_check_init(const int expect)
+int
+_pqos_check_init(const int expect)
 {
         if (m_init_done && (!expect)) {
                 LOG_ERROR("PQoS library already initialized\n");
@@ -325,7 +348,6 @@ add_monitoring_event(struct pqos_cap_mon *mon,
         mon->events[mon->num_events].type = (enum pqos_mon_event) event_type;
         mon->events[mon->num_events].max_rmid = max_rmid;
         mon->events[mon->num_events].scale_factor = scale_factor;
-        mon->events[mon->num_events].pid_support = 0;
         mon->num_events++;
 }
 
@@ -464,21 +486,21 @@ discover_monitoring(struct pqos_cap_mon **r_mon,
 }
 
 /**
- * @brief Checks CDP enable status across all CPU sockets
+ * @brief Checks L3 CDP enable status across all CPU sockets
  *
- * It also validates if CDP enabling is consistent across
+ * It also validates if L3 CDP enabling is consistent across
  * CPU sockets.
  * At the moment, such scenario is considered as error
  * that requires CAT reset.
  *
  * @param cpu detected CPU topology
- * @param enabled place to store CDP enabling status
+ * @param enabled place to store L3 CDP enabling status
  *
  * @return Operations status
  * @retval PQOS_RETVAL_OK on success
  */
 static int
-cdp_is_enabled(const struct pqos_cpuinfo *cpu,
+l3cdp_is_enabled(const struct pqos_cpuinfo *cpu,
                int *enabled)
 {
         unsigned *sockets = NULL;
@@ -505,13 +527,13 @@ cdp_is_enabled(const struct pqos_cpuinfo *cpu,
 
                 ret = pqos_cpu_get_one_core(cpu, sockets[j], &core);
                 if (ret != PQOS_RETVAL_OK)
-			goto cdp_is_enabled_exit;
+                        goto l3cdp_is_enabled_exit;
 
                 if (msr_read(core, PQOS_MSR_L3_QOS_CFG, &reg) !=
                     MACHINE_RETVAL_OK) {
-			ret = PQOS_RETVAL_ERROR;
-			goto cdp_is_enabled_exit;
-		}
+                        ret = PQOS_RETVAL_ERROR;
+                        goto l3cdp_is_enabled_exit;
+                }
 
                 if (reg & PQOS_MSR_L3_QOS_CFG_CDP_EN)
                         enabled_num++;
@@ -520,20 +542,92 @@ cdp_is_enabled(const struct pqos_cpuinfo *cpu,
         }
 
         if (disabled_num > 0 && enabled_num > 0) {
-                LOG_ERROR("Inconsistent CDP settings across sockets."
+                LOG_ERROR("Inconsistent L3 CDP settings across sockets."
                           "Please reset CAT or reboot your system!\n");
                 ret = PQOS_RETVAL_ERROR;
-		goto cdp_is_enabled_exit;
+                goto l3cdp_is_enabled_exit;
         }
 
         if (enabled_num > 0)
                 *enabled = 1;
 
-        LOG_INFO("CDP is %s\n",
-                 (*enabled) ? "enabled" : "disabled");
+        LOG_INFO("L3 CDP is %s\n", (*enabled) ? "enabled" : "disabled");
 
- cdp_is_enabled_exit:
-	free(sockets);
+ l3cdp_is_enabled_exit:
+        if (sockets != NULL)
+                free(sockets);
+
+        return ret;
+}
+
+/**
+ * @brief Checks L2 CDP enable status across all CPU clusters
+ *
+ * It also validates if L2 CDP enabling is consistent across
+ * CPU clusters.
+ * At the moment, such scenario is considered as error
+ * that requires CAT reset.
+ *
+ * @param cpu detected CPU topology
+ * @param enabled place to store L2 CDP enabling status
+ *
+ * @return Operations status
+ * @retval PQOS_RETVAL_OK on success
+ */
+static int
+l2cdp_is_enabled(const struct pqos_cpuinfo *cpu, int *enabled)
+{
+        unsigned *l2ids = NULL;
+        unsigned l2id_num = 0;
+        unsigned enabled_num = 0, disabled_num = 0;
+        unsigned i;
+        int ret = PQOS_RETVAL_OK;
+
+        /**
+         * Get list of L2 clusters id's
+         */
+        l2ids = pqos_cpu_get_l2ids(cpu, &l2id_num);
+        if (l2ids == NULL || l2id_num == 0) {
+                ret = PQOS_RETVAL_RESOURCE;
+                goto l2cdp_is_enabled_exit;
+        }
+
+        for (i = 0; i < l2id_num; i++) {
+                uint64_t reg = 0;
+                unsigned core = 0;
+
+                ret = pqos_cpu_get_one_by_l2id(cpu, l2ids[i], &core);
+                if (ret != PQOS_RETVAL_OK)
+                        goto l2cdp_is_enabled_exit;
+
+                if (msr_read(core, PQOS_MSR_L2_QOS_CFG, &reg) !=
+                    MACHINE_RETVAL_OK) {
+                        ret = PQOS_RETVAL_ERROR;
+                        goto l2cdp_is_enabled_exit;
+                }
+
+                if (reg & PQOS_MSR_L2_QOS_CFG_CDP_EN)
+                        enabled_num++;
+                else
+                        disabled_num++;
+        }
+
+        if (disabled_num > 0 && enabled_num > 0) {
+                LOG_ERROR("Inconsistent L2 CDP settings across clusters."
+                          "Please reset CAT or reboot your system!\n");
+                ret = PQOS_RETVAL_ERROR;
+                goto l2cdp_is_enabled_exit;
+        }
+
+        if (enabled_num > 0)
+                *enabled = 1;
+
+        LOG_INFO("L2 CDP is %s\n", (*enabled) ? "enabled" : "disabled");
+
+ l2cdp_is_enabled_exit:
+        if (l2ids != NULL)
+                free(l2ids);
+
         return ret;
 }
 
@@ -619,8 +713,9 @@ discover_alloc_l3_brandstr(struct pqos_cap_l3ca *cap)
         struct cpuid_out res;
         int ret = PQOS_RETVAL_OK,
                 match_found = 0;
-        char brand_str[MAX_BRAND_STRING_LEN+1];
-        uint32_t *brand_u32 = (uint32_t *)brand_str;
+        uint32_t brand[MAX_BRAND_STRING_LEN / 4 + 1];
+        char *brand_str = (char *)brand;
+        uint32_t *brand_u32 = brand;
         unsigned i = 0;
 
         /**
@@ -636,7 +731,7 @@ discover_alloc_l3_brandstr(struct pqos_cap_l3ca *cap)
                 return PQOS_RETVAL_ERROR;
         }
 
-        memset(brand_str, 0, sizeof(brand_str));
+        memset(brand, 0, sizeof(brand));
 
         for (i = 0; i < CPUID_LEAF_BRAND_NUM; i++) {
                 lcpuid((unsigned)CPUID_LEAF_BRAND_START + i, 0, &res);
@@ -718,9 +813,9 @@ discover_alloc_l3_cpuid(struct pqos_cap_l3ca *cap,
                  */
                 int cdp_on = 0;
 
-                ret = cdp_is_enabled(cpu, &cdp_on);
+                ret = l3cdp_is_enabled(cpu, &cdp_on);
                 if (ret != PQOS_RETVAL_OK) {
-                        LOG_ERROR("CDP detection error!\n");
+                        LOG_ERROR("L3 CDP detection error!\n");
                         return ret;
                 }
                 cap->cdp_on = cdp_on;
@@ -796,16 +891,8 @@ discover_alloc_l3(struct pqos_cap_l3ca **r_cap,
                                              &l3_size);
         }
 
-        if (ret == PQOS_RETVAL_OK) {
-                if (cap->num_ways > 0)
-                        cap->way_size = l3_size / cap->num_ways;
-                LOG_INFO("L3 CAT details: CDP support=%d, CDP on=%d, "
-                         "#COS=%u, #ways=%u, ways contention bit-mask 0x%x\n",
-                         cap->cdp, cap->cdp_on, cap->num_classes,
-                         cap->num_ways, cap->way_contention);
-                LOG_INFO("L3 CAT details: cache size %u bytes, "
-                         "way size %u bytes\n", l3_size, cap->way_size);
-        }
+        if (cap->num_ways > 0)
+                cap->way_size = l3_size / cap->num_ways;
 
         if (ret == PQOS_RETVAL_OK)
                 (*r_cap) = cap;
@@ -870,7 +957,26 @@ discover_alloc_l2(struct pqos_cap_l2ca **r_cap,
 
 	cap->num_classes = res.edx+1;
 	cap->num_ways = res.eax+1;
+        cap->cdp = (res.ecx >> PQOS_CPUID_CAT_CDP_BIT) & 1;
+        cap->cdp_on = 0;
 	cap->way_contention = (uint64_t) res.ebx;
+
+        if (cap->cdp) {
+                int cdp_on = 0;
+
+                /*
+                 * Check if L2 CDP is enabled
+                 */
+                ret = l2cdp_is_enabled(cpu, &cdp_on);
+                if (ret != PQOS_RETVAL_OK) {
+                        LOG_ERROR("L2 CDP detection error!\n");
+                        free(cap);
+                        return ret;
+                }
+                cap->cdp_on = cdp_on;
+                if (cdp_on)
+                        cap->num_classes = cap->num_classes / 2;
+        }
 
 	ret = get_cache_info(&cpu->l2, NULL, &l2_size);
 	if (ret != PQOS_RETVAL_OK) {
@@ -880,12 +986,6 @@ discover_alloc_l2(struct pqos_cap_l2ca **r_cap,
 	}
 	if (cap->num_ways > 0)
 		cap->way_size = l2_size / cap->num_ways;
-
-	LOG_INFO("L2 CAT details: "
-		 "#COS=%u, #ways=%u, ways contention bit-mask 0x%x\n",
-		 cap->num_classes, cap->num_ways, cap->way_contention);
-	LOG_INFO("L2 CAT details: cache size %u bytes, way size %u bytes\n",
-		 l2_size, cap->way_size);
 
 	(*r_cap) = cap;
         return ret;
@@ -915,6 +1015,8 @@ discover_alloc_mba(struct pqos_cap_mba **r_cap)
 
         memset(cap, 0, sz);
         cap->mem_size = sz;
+        cap->ctrl = -1;
+        cap->ctrl_on = 0;
 
         /**
          * Run CPUID.0x7.0 to check
@@ -950,12 +1052,6 @@ discover_alloc_mba(struct pqos_cap_mba **r_cap)
                 return PQOS_RETVAL_RESOURCE;
         }
 
-	LOG_INFO("MBA details: "
-		 "#COS=%u, %slinear, max=%u, step=%u\n",
-		 cap->num_classes,
-                 cap->is_linear ? "" : "non-",
-                 cap->throttle_max, cap->throttle_step);
-
 	(*r_cap) = cap;
         return ret;
 }
@@ -965,27 +1061,37 @@ discover_alloc_mba(struct pqos_cap_mba **r_cap)
  *
  * @param p_cap place to store allocated capabilities structure
  * @param cpu detected cpu topology
+ * @param inter selected pqos interface
  *
  * @return Operation status
  * @retval PQOS_RETVAL_OK success
  */
 static int
 discover_capabilities(struct pqos_cap **p_cap,
-                      const struct pqos_cpuinfo *cpu)
+                      const struct pqos_cpuinfo *cpu,
+                      enum pqos_interface inter)
 {
         struct pqos_cap_mon *det_mon = NULL;
         struct pqos_cap_l3ca *det_l3ca = NULL;
         struct pqos_cap_l2ca *det_l2ca = NULL;
         struct pqos_cap_mba *det_mba = NULL;
         struct pqos_cap *_cap = NULL;
-        struct pqos_capability *item = NULL;
         unsigned sz = 0;
         int ret = PQOS_RETVAL_OK;
+
+        if (inter != PQOS_INTER_MSR && inter != PQOS_INTER_OS &&
+            inter != PQOS_INTER_OS_RESCTRL_MON)
+                return PQOS_RETVAL_PARAM;
 
         /**
          * Monitoring init
          */
-        ret = discover_monitoring(&det_mon, cpu);
+        if (inter == PQOS_INTER_MSR)
+                ret = discover_monitoring(&det_mon, cpu);
+#ifdef __linux__
+        else if (inter == PQOS_INTER_OS || inter == PQOS_INTER_OS_RESCTRL_MON)
+                ret = os_cap_mon_discover(&det_mon, cpu);
+#endif
         switch (ret) {
         case PQOS_RETVAL_OK:
                 LOG_INFO("Monitoring capability detected\n");
@@ -1003,10 +1109,23 @@ discover_capabilities(struct pqos_cap **p_cap,
         /**
          * L3 Cache allocation init
          */
-        ret = discover_alloc_l3(&det_l3ca, cpu);
+        if (inter == PQOS_INTER_MSR)
+                ret = discover_alloc_l3(&det_l3ca, cpu);
+#ifdef __linux__
+        else if (inter == PQOS_INTER_OS || inter == PQOS_INTER_OS_RESCTRL_MON)
+                ret = os_cap_l3ca_discover(&det_l3ca, cpu);
+#endif
         switch (ret) {
         case PQOS_RETVAL_OK:
                 LOG_INFO("L3CA capability detected\n");
+                LOG_INFO("L3 CAT details: CDP support=%d, CDP on=%d, "
+                         "#COS=%u, #ways=%u, ways contention bit-mask 0x%x\n",
+                         det_l3ca->cdp, det_l3ca->cdp_on, det_l3ca->num_classes,
+                         det_l3ca->num_ways, det_l3ca->way_contention);
+                LOG_INFO("L3 CAT details: cache size %u bytes, "
+                         "way size %u bytes\n",
+                         det_l3ca->way_size * det_l3ca->num_ways,
+                         det_l3ca->way_size);
                 sz += sizeof(struct pqos_capability);
                 break;
         case PQOS_RETVAL_RESOURCE:
@@ -1021,10 +1140,22 @@ discover_capabilities(struct pqos_cap **p_cap,
         /**
          * L2 Cache allocation init
          */
-        ret = discover_alloc_l2(&det_l2ca, cpu);
+        if (inter == PQOS_INTER_MSR)
+                ret = discover_alloc_l2(&det_l2ca, cpu);
+#ifdef __linux__
+        else if (inter == PQOS_INTER_OS || inter == PQOS_INTER_OS_RESCTRL_MON)
+                ret = os_cap_l2ca_discover(&det_l2ca, cpu);
+#endif
         switch (ret) {
         case PQOS_RETVAL_OK:
                 LOG_INFO("L2CA capability detected\n");
+                LOG_INFO("L2 CAT details: CDP support=%d, CDP on=%d, "
+                         "#COS=%u, #ways=%u, ways contention bit-mask 0x%x\n",
+                         det_l2ca->cdp, det_l2ca->cdp_on, det_l2ca->num_classes,
+                         det_l2ca->num_ways, det_l2ca->way_contention);
+                LOG_INFO("L2 CAT details: cache size %u bytes, way size %u "
+                         "bytes\n", det_l2ca->way_size * det_l2ca->num_ways,
+                         det_l2ca->way_size);
                 sz += sizeof(struct pqos_capability);
                 break;
         case PQOS_RETVAL_RESOURCE:
@@ -1039,10 +1170,20 @@ discover_capabilities(struct pqos_cap **p_cap,
         /**
          * Memory bandwidth allocation init
          */
-        ret = discover_alloc_mba(&det_mba);
+        if (inter == PQOS_INTER_MSR)
+                ret = discover_alloc_mba(&det_mba);
+#ifdef __linux__
+        else if (inter == PQOS_INTER_OS || inter == PQOS_INTER_OS_RESCTRL_MON)
+                ret = os_cap_mba_discover(&det_mba, cpu);
+#endif
         switch (ret) {
         case PQOS_RETVAL_OK:
                 LOG_INFO("MBA capability detected\n");
+                LOG_INFO("MBA details: "
+                         "#COS=%u, %slinear, max=%u, step=%u\n",
+                         det_mba->num_classes,
+                         det_mba->is_linear ? "" : "non-",
+                         det_mba->throttle_max, det_mba->throttle_step);
                 sz += sizeof(struct pqos_capability);
                 break;
         case PQOS_RETVAL_RESOURCE:
@@ -1071,39 +1212,47 @@ discover_capabilities(struct pqos_cap **p_cap,
         memset(_cap, 0, sz);
         _cap->mem_size = sz;
         _cap->version = PQOS_VERSION;
-        item = &_cap->capabilities[0];
 
         if (det_mon != NULL) {
+                _cap->capabilities[_cap->num_cap].type = PQOS_CAP_TYPE_MON;
+                _cap->capabilities[_cap->num_cap].u.mon = det_mon;
                 _cap->num_cap++;
-                item->type = PQOS_CAP_TYPE_MON;
-                item->u.mon = det_mon;
-                item++;
                 ret = PQOS_RETVAL_OK;
         }
 
         if (det_l3ca != NULL) {
+                _cap->capabilities[_cap->num_cap].type = PQOS_CAP_TYPE_L3CA;
+                _cap->capabilities[_cap->num_cap].u.l3ca = det_l3ca;
                 _cap->num_cap++;
-                item->type = PQOS_CAP_TYPE_L3CA;
-                item->u.l3ca = det_l3ca;
-                item++;
                 ret = PQOS_RETVAL_OK;
         }
 
         if (det_l2ca != NULL) {
+                _cap->capabilities[_cap->num_cap].type = PQOS_CAP_TYPE_L2CA;
+                _cap->capabilities[_cap->num_cap].u.l2ca = det_l2ca;
                 _cap->num_cap++;
-                item->type = PQOS_CAP_TYPE_L2CA;
-                item->u.l2ca = det_l2ca;
-                item++;
                 ret = PQOS_RETVAL_OK;
         }
 
         if (det_mba != NULL) {
+                _cap->capabilities[_cap->num_cap].type = PQOS_CAP_TYPE_MBA;
+                _cap->capabilities[_cap->num_cap].u.mba = det_mba;
                 _cap->num_cap++;
-                item->type = PQOS_CAP_TYPE_MBA;
-                item->u.mba = det_mba;
-                item++;
                 ret = PQOS_RETVAL_OK;
+#ifdef __linux__
+                /**
+                 * Check status of MBA CTRL
+                 */
+                if (inter == PQOS_INTER_OS ||
+                    inter == PQOS_INTER_OS_RESCTRL_MON) {
+                        ret = os_cap_get_mba_ctrl(_cap, cpu, &det_mba->ctrl,
+                                                  &det_mba->ctrl_on);
+                        if (ret != PQOS_RETVAL_OK)
+                                goto error_exit;
+                }
+#endif
         }
+
 
         (*p_cap) = _cap;
 
@@ -1117,6 +1266,8 @@ discover_capabilities(struct pqos_cap **p_cap,
                         free(det_l2ca);
                 if (det_mba != NULL)
                         free(det_mba);
+                if (_cap != NULL)
+                        free(_cap);
         }
 
         return ret;
@@ -1137,9 +1288,35 @@ pqos_init(const struct pqos_config *config)
         int ret = PQOS_RETVAL_OK;
         unsigned i = 0, max_core = 0;
         int cat_init = 0, mon_init = 0;
+        char *environment = NULL;
 
         if (config == NULL)
                 return PQOS_RETVAL_PARAM;
+
+        environment = getenv("RDT_IFACE");
+        if (environment != NULL) {
+                if (strncasecmp(environment, "OS", 2) == 0) {
+                        if (config->interface != PQOS_INTER_OS) {
+                                fprintf(stderr, "Interface initialization "
+                                        "error!\nYour system has been "
+                                        "restricted to use the OS interface "
+                                        "only!\n");
+                                return PQOS_RETVAL_ERROR;
+                        }
+                } else if (strncasecmp(environment, "MSR", 3) == 0) {
+                        if (config->interface != PQOS_INTER_MSR) {
+                                fprintf(stderr, "Interface initialization "
+                                        "error!\nYour system has been "
+                                        "restricted to use the MSR interface "
+                                        "only!\n");
+                                return PQOS_RETVAL_ERROR;
+                        }
+                } else {
+                        fprintf(stderr, "Interface initialization error!\n"
+                                "Invalid interface enforcement selection.\n");
+                        return PQOS_RETVAL_ERROR;
+                }
+        }
 
         if (_pqos_api_init() != 0) {
                 fprintf(stderr, "API lock initialization error!\n");
@@ -1173,7 +1350,6 @@ pqos_init(const struct pqos_config *config)
                 ret = PQOS_RETVAL_ERROR;
                 goto log_init_error;
         }
-        ret = PQOS_RETVAL_OK;
 
         /**
          * Find max core id in the topology
@@ -1188,12 +1364,53 @@ pqos_init(const struct pqos_config *config)
                 goto cpuinfo_init_error;
         }
 
-        ret = discover_capabilities(&m_cap, m_cpu);
+#ifdef __linux__
+        if (config->interface == PQOS_INTER_OS ||
+                config->interface == PQOS_INTER_OS_RESCTRL_MON) {
+                ret = os_cap_init(config->interface);
+                if (ret != PQOS_RETVAL_OK) {
+                        LOG_ERROR("os_cap_init() error %d\n", ret);
+                        goto machine_init_error;
+                }
+        } else if (access(RESCTRL_PATH"/cpus", F_OK) == 0)
+                LOG_WARN("resctl filesystem mounted! Using MSR "
+                         "interface may corrupt resctrl filesystem "
+                         "and cause unexpected behaviour\n");
+#endif
+
+        ret = discover_capabilities(&m_cap, m_cpu, config->interface);
         if (ret != PQOS_RETVAL_OK) {
                 LOG_ERROR("discover_capabilities() error %d\n", ret);
                 goto machine_init_error;
         }
-        ASSERT(m_cap != NULL);
+
+        ret = _pqos_utils_init(config->interface);
+        if (ret != PQOS_RETVAL_OK) {
+                fprintf(stderr, "Utils initialization error!\n");
+                goto machine_init_error;
+        }
+
+        ret = api_init(config->interface);
+        if (ret != PQOS_RETVAL_OK) {
+                LOG_ERROR("_pqos_api_init() error %d\n", ret);
+                goto machine_init_error;
+        }
+#ifdef __linux__
+        m_interface = config->interface;
+#endif
+        ret = pqos_alloc_init(m_cpu, m_cap, config);
+        switch (ret) {
+        case PQOS_RETVAL_BUSY:
+                LOG_ERROR("OS allocation init error!\n");
+                goto machine_init_error;
+        case PQOS_RETVAL_OK:
+                LOG_DEBUG("allocation init OK\n");
+                cat_init = 1;
+                break;
+        default:
+                LOG_ERROR("allocation init error %d\n", ret);
+                break;
+        }
 
         /**
          * If monitoring capability has been discovered
@@ -1204,6 +1421,7 @@ pqos_init(const struct pqos_config *config)
         switch (ret) {
         case PQOS_RETVAL_RESOURCE:
                 LOG_DEBUG("monitoring init aborted: feature not present\n");
+                ret = PQOS_RETVAL_OK;
                 break;
         case PQOS_RETVAL_OK:
                 LOG_DEBUG("monitoring init OK\n");
@@ -1213,14 +1431,6 @@ pqos_init(const struct pqos_config *config)
         default:
                 LOG_ERROR("monitoring init error %d\n", ret);
                 break;
-        }
-
-        ret = pqos_alloc_init(m_cpu, m_cap, config);
-        if (ret != PQOS_RETVAL_OK) {
-                LOG_ERROR("allocation init error %d\n", ret);
-        } else {
-                LOG_DEBUG("allocation init OK\n");
-                cat_init = 1;
         }
 
         if (cat_init == 0 && mon_init == 0) {
@@ -1240,8 +1450,11 @@ pqos_init(const struct pqos_config *config)
                 (void) log_fini();
  init_error:
         if (ret != PQOS_RETVAL_OK) {
-                if (m_cap != NULL)
+                if (m_cap != NULL) {
+                        for (i = 0; i < m_cap->num_cap; i++)
+                                free(m_cap->capabilities[i].u.generic_ptr);
                         free(m_cap);
+                }
                 m_cpu = NULL;
                 m_cap = NULL;
         }
@@ -1336,26 +1549,22 @@ pqos_cap_get(const struct pqos_cap **cap,
                 return ret;
         }
 
-        if (cap != NULL) {
-                ASSERT(m_cap != NULL);
-                *cap = m_cap;
-        }
-
-        if (cpu != NULL) {
-                ASSERT(m_cpu != NULL);
-                *cpu = m_cpu;
-        }
+        _pqos_cap_get(cap, cpu);
 
         _pqos_api_unlock();
         return PQOS_RETVAL_OK;
 }
 
-void _pqos_cap_l3cdp_change(const int prev, const int next)
+void
+_pqos_cap_l3cdp_change(const enum pqos_cdp_config cdp)
 {
         struct pqos_cap_l3ca *l3_cap = NULL;
         unsigned i;
 
+        ASSERT(cdp == PQOS_REQUIRE_CDP_ON || cdp == PQOS_REQUIRE_CDP_OFF ||
+               cdp == PQOS_REQUIRE_CDP_ANY);
         ASSERT(m_cap != NULL);
+
         if (m_cap == NULL)
                 return;
 
@@ -1366,15 +1575,101 @@ void _pqos_cap_l3cdp_change(const int prev, const int next)
         if (l3_cap == NULL)
                 return;
 
-        if (!prev && next) {
+        if (cdp == PQOS_REQUIRE_CDP_ON && !l3_cap->cdp_on) {
                 /* turn on */
                 l3_cap->cdp_on = 1;
                 l3_cap->num_classes = l3_cap->num_classes / 2;
         }
 
-        if (prev && !next) {
+        if (cdp == PQOS_REQUIRE_CDP_OFF && l3_cap->cdp_on) {
                 /* turn off */
                 l3_cap->cdp_on = 0;
                 l3_cap->num_classes = l3_cap->num_classes * 2;
         }
+}
+
+void
+_pqos_cap_l2cdp_change(const enum pqos_cdp_config cdp)
+{
+        struct pqos_cap_l2ca *l2_cap = NULL;
+        unsigned i;
+
+        ASSERT(cdp == PQOS_REQUIRE_CDP_ON || cdp == PQOS_REQUIRE_CDP_OFF ||
+               cdp == PQOS_REQUIRE_CDP_ANY);
+        ASSERT(m_cap != NULL);
+
+        if (m_cap == NULL)
+                return;
+
+        for (i = 0; i < m_cap->num_cap && l2_cap == NULL; i++)
+                if (m_cap->capabilities[i].type == PQOS_CAP_TYPE_L2CA)
+                        l2_cap = m_cap->capabilities[i].u.l2ca;
+
+        if (l2_cap == NULL)
+                return;
+
+        if (cdp == PQOS_REQUIRE_CDP_ON && !l2_cap->cdp_on) {
+                /* turn on */
+                l2_cap->cdp_on = 1;
+                l2_cap->num_classes = l2_cap->num_classes / 2;
+        }
+
+        if (cdp == PQOS_REQUIRE_CDP_OFF && l2_cap->cdp_on) {
+                /* turn off */
+                l2_cap->cdp_on = 0;
+                l2_cap->num_classes = l2_cap->num_classes * 2;
+        }
+}
+
+void
+_pqos_cap_mba_change(const enum pqos_mba_config cfg)
+{
+        struct pqos_cap_mba *mba_cap = NULL;
+        unsigned i;
+
+        ASSERT(cfg == PQOS_MBA_DEFAULT || cfg == PQOS_MBA_CTRL ||
+               cfg == PQOS_MBA_ANY);
+        ASSERT(m_cap == NULL);
+
+        if (m_cap == NULL)
+                return;
+
+        for (i = 0; i < m_cap->num_cap && mba_cap == NULL; i++)
+                if (m_cap->capabilities[i].type == PQOS_CAP_TYPE_MBA)
+                        mba_cap = m_cap->capabilities[i].u.mba;
+
+        if (mba_cap == NULL)
+                return;
+
+        if (cfg == PQOS_MBA_DEFAULT)
+                mba_cap->ctrl_on = 0;
+        else if (cfg == PQOS_MBA_CTRL) {
+#ifdef __linux__
+                if (m_interface != PQOS_INTER_MSR)
+                        mba_cap->ctrl = 1;
+#endif
+                mba_cap->ctrl_on = 1;
+        }
+}
+
+void
+_pqos_cap_get(const struct pqos_cap **cap,
+              const struct pqos_cpuinfo **cpu)
+{
+        if (cap != NULL) {
+                ASSERT(m_cap != NULL);
+                *cap = m_cap;
+        }
+
+        if (cpu != NULL) {
+                ASSERT(m_cpu != NULL);
+                *cpu = m_cpu;
+        }
+}
+
+int
+_pqos_cap_get_type(const enum pqos_cap_type type,
+                   const struct pqos_capability **cap_item)
+{
+        return pqos_cap_get_type(m_cap, type, cap_item);
 }

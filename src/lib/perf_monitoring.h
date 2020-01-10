@@ -1,7 +1,7 @@
 /*
  * BSD LICENSE
  *
- * Copyright(c) 2014-2015 Intel Corporation. All rights reserved.
+ * Copyright(c) 2018-2019 Intel Corporation. All rights reserved.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -33,85 +33,97 @@
  */
 
 /**
- * @brief Platform QoS Process Monitoring API
+ * @brief Internal header file for perf monitoring functions
  */
 
-#include "pqos.h"
-
-#ifndef __PQOS_PIDAPI_H__
-#define __PQOS_PIDAPI_H__
+#ifndef __PQOS_PERF_MON_H__
+#define __PQOS_PERF_MON_H__
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/**
- * @brief This function initializes the PID monitoring module
- *
- * Checks kernel and event support, sets up event attributes
- * and update capabilities structure
- *
- * @param cap capabilities structure to be updated
- *
- * @return Operation status
- * @retval PQOS_RETVAL_OK on success
- * @retval PQOS_RETVAL_RESOURCE pid mon not supported/no events found
- * @retval PQOS_RETVAL_ERROR if error occurs
- */
-int
-pqos_pid_init(const struct pqos_cap *cap);
+#define PERF_MON_PATH "/sys/devices/intel_cqm/"
 
 /**
- * @brief This function finalizes the PID monitoring module
- *
- * @return Operation status
- * @retval PQOS_RETVAL_OK on success
- * @retval PQOS_RETVAL_ERROR if error occurs
+ * Local monitor event types
  */
-int
-pqos_pid_fini(void);
+enum perf_mon_event {
+        PQOS_PERF_EVENT_INSTRUCTIONS = 0x1000, /**< Retired CPU Instructions */
+        PQOS_PERF_EVENT_CYCLES = 0x2000,       /**< Unhalted CPU Clock Cycles */
+};
 
 /**
- * @brief This function starts all perf counters for a process
+ * @brief Initializes Perf structures used for OS monitoring interface
+ *
+ * @param cpu cpu topology structure
+ * @param cap capabilities structure
+ *
+ * @return Operational status
+ * @retval PQOS_RETVAL_OK success
+ */
+int perf_mon_init(const struct pqos_cpuinfo *cpu, const struct pqos_cap *cap);
+
+/**
+ * @brief Shuts down monitoring sub-module for perf monitoring
+ *
+ * @return Operation status
+ * @retval PQOS_RETVAL_OK success
+ */
+int perf_mon_fini(void);
+
+/**
+ * @brief This function starts Perf pqos event counters
+ *
+ * Used to start pqos counters and request file
+ * descriptors used to read the counters
  *
  * @param group monitoring structure
+ * @param event PQoS event type
  *
  * @return Operation status
  * @retval PQOS_RETVAL_OK on success
- * @retval PQOS_RETVAL_ERROR if error occurs
  */
-int
-pqos_pid_start(struct pqos_mon_data *group);
+int perf_mon_start(struct pqos_mon_data *group,
+	           const enum pqos_mon_event event);
 
 /**
- * @brief This function stops all perf counters for a process
- *
- * Stops all counters and frees associated data structures
+ * @brief Function to stop Perf event counters
  *
  * @param group monitoring structure
+ * @param event PQoS event type
  *
  * @return Operation status
  * @retval PQOS_RETVAL_OK on success
- * @retval PQOS_RETVAL_ERROR if error occurs
  */
-int
-pqos_pid_stop(struct pqos_mon_data *group);
+int perf_mon_stop(struct pqos_mon_data *group, const enum pqos_mon_event event);
 
 /**
- * @brief This function reads all perf counters for a process
+ * @brief This function polls all perf counters
  *
  * Reads counters for all events and stores values
  *
  * @param group monitoring structure
+ * @param event PQoS event type
  *
  * @return Operation status
  * @retval PQOS_RETVAL_OK on success
  * @retval PQOS_RETVAL_ERROR if error occurs
  */
-int
-pqos_pid_poll(struct pqos_mon_data *group);
+int perf_mon_poll(struct pqos_mon_data *group, const enum pqos_mon_event event);
+
+/**
+ * @brief Check if event is supported by perf
+ *
+ * @param event PQoS event to check
+ *
+ * @retval 0 if not supported
+ */
+int perf_mon_is_event_supported(const enum pqos_mon_event event);
+
 
 #ifdef __cplusplus
 }
 #endif
-#endif
+
+#endif /* __PQOS_PERF_MON_H__ */

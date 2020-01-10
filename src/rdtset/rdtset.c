@@ -1,7 +1,7 @@
 /*
  *   BSD LICENSE
  *
- *   Copyright(c) 2016 Intel Corporation. All rights reserved.
+ *   Copyright(c) 2016-2019 Intel Corporation. All rights reserved.
  *   All rights reserved.
  *
  *   Redistribution and use in source and binary forms, with or without
@@ -34,6 +34,7 @@
 #include <errno.h>
 #include <getopt.h>
 #include <grp.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -46,6 +47,9 @@
 #include "rdt.h"
 #include "common.h"
 #include "cpu.h"
+#include "mba_sc.h"
+
+static pid_t child = -1;
 
 /**
  * @brief Detect if sudo was used to elevate privileges and drop them
@@ -117,12 +121,12 @@ err:
 static int
 execute_cmd(int argc, char **argv)
 {
-	int i = 0;
-
 	if (0 >= argc || NULL == argv)
 		return -1;
 
 	if (g_cfg.verbose) {
+		int i;
+
 		printf("Trying to execute ");
 		for (i = 0; i < argc; i++)
 			printf("%s ", argv[i]);
@@ -130,28 +134,31 @@ execute_cmd(int argc, char **argv)
 		printf("\n");
 	}
 
-	pid_t pid = fork();
+	child = fork();
 
-	if (-1 == pid) {
+	if (-1 == child) {
 		fprintf(stderr, "%s,%s:%d Failed to execute %s !"
 				" fork failed\n", __FILE__, __func__, __LINE__,
 				argv[0]);
 		return -1;
-	} else if (0 < pid) {
+	} else if (0 < child) {
 		int status = EXIT_FAILURE;
 		/* Wait for child */
-		waitpid(pid, &status, 0);
-
-		if (EXIT_SUCCESS != status)
-			return -1;
+		int ret = waitpid(child, &status, WNOHANG);
+                if (ret < -1)
+                        return -1;
+                if (ret == child &&
+                    (!WIFEXITED(status) && WEXITSTATUS(status) != EXIT_SUCCESS))
+                        return -1;
 	} else {
-		/* set cpu affinity */
-		if (0 != set_affinity(0)) {
-			fprintf(stderr, "%s,%s:%d Failed to set core "
-				"affinity!\n", __FILE__, __func__,
-				__LINE__);
-			_Exit(EXIT_FAILURE);
-		}
+                if (0 != CPU_COUNT(&g_cfg.cpu_aff_cpuset))
+                        /* set cpu affinity */
+                        if (0 != set_affinity(0)) {
+                                fprintf(stderr, "%s,%s:%d Failed to set core "
+                                        "affinity!\n", __FILE__, __func__,
+                                        __LINE__);
+                                _Exit(EXIT_FAILURE);
+                        }
 
 		/* drop elevated root privileges */
 		if (0 == g_cfg.sudo_keep && 0 != sudo_drop())
@@ -180,15 +187,17 @@ execute_cmd(int argc, char **argv)
 static void
 print_usage(char *prgname, unsigned short_usage)
 {
-	printf("Usage: %s <-t feature=value;...cpu=cpulist>... -c <cpulist> "
-		"(-p <pid> | [-k] cmd [<args>...])\n"
-		"       %s -r <cpulist> <-t feature=value;...cpu=cpulist>... "
-		"-c <cpulist> (-p <pid> | [-k] cmd [<args>...])\n"
+	printf("Usage: %s -t <feature=value;...cpu=cpulist>... -c <cpulist> "
+		"[-I] (-p <pidlist> | [-k] cmd [<args>...])\n"
+		"       %s -r <cpulist> -t <feature=value;...cpu=cpulist>... "
+		"-c <cpulist> [-I] (-p <pidlist> | [-k] cmd [<args>...])\n"
 		"       %s -r <cpulist> -c <cpulist> "
-		"(-p <pid> | [-k] cmd [<args>...])\n"
-		"       %s -r <cpulist> <-t feature=value;...cpu=cpulist>... "
-		"-p <pid>\n\n",
-		prgname, prgname, prgname, prgname);
+		"(-p <pidlist> | [-k] cmd [<args>...])\n"
+		"       %s -r <cpulist> -t <feature=value;...cpu=cpulist>... "
+		"[-I] -p <pidlist>\n"
+                "       %s -t <feature=value> -I [-c <cpulist>] "
+                "(-p <pidlist> | [-k] cmd [<args>...])\n\n",
+                prgname, prgname, prgname, prgname, prgname);
 
 	printf("Options:\n"
 		" -t/--rdt feature=value;...cpu=cpulist "
@@ -196,16 +205,23 @@ print_usage(char *prgname, unsigned short_usage)
 		"  Features:\n"
 		"   2, l2\n"
 		"   3, l3\n"
+		"   m, mba\n"
+                "   b, mba_max\n"
 		" -c <cpulist>, --cpu <cpulist>         "
 		"specify CPUs (affinity)\n"
-		" -p <pid>, --pid <pid>                 "
+		" -p <pidlist>, --pid <pidlist>                 "
 		"operate on existing given pid\n"
 		" -r <cpulist>, --reset <cpulist>       "
-		"reset CAT for CPUs\n"
+		"reset allocation for CPUs\n"
 		" -k, --sudokeep                        "
 		"do not drop sudo elevated privileges\n"
 		" -v, --verbose                         "
 		"prints out additional logging information\n"
+		" -I, --iface-os                        "
+		"set the library interface to use the kernel implementation\n"
+		"                                       "
+	        "If not set the default implementation"
+	        " is to program the MSR's directly\n"
 		" -h, --help                            "
 		"display help\n\n");
 
@@ -218,7 +234,7 @@ print_usage(char *prgname, unsigned short_usage)
 		",\nkeeping sudo elevated privileges:\n"
 		"    -t 'l3=0xf;cpu=1' -c 1 -k id\n\n");
 
-	printf("Examples CAT configuration strings:\n"
+	printf("Examples CAT/MBA configuration strings:\n"
 		"    -t 'l3=0xf;cpu=1'\n"
 		"        CPU 1 uses four L3 cache-ways (mask 0xf)\n\n"
 
@@ -249,7 +265,23 @@ print_usage(char *prgname, unsigned short_usage)
 		"        On CDP enabled system, CPU 1 uses four L3 cache-ways "
 		"for code (mask 0xf)\n"
 		"        and four L3 cache-ways for data (mask 0xf0),\n"
-		"        data and code L3 cache-ways are non-overlapping\n\n");
+		"        data and code L3 cache-ways are non-overlapping\n\n"
+
+		"    -t 'mba=50;l3=0xf;cpu=1'\n"
+		"        CPU 1 uses four L3 (mask 0xf) cache-ways and can utilize\n"
+		"        up to 50%% of available memory bandwidth\n\n"
+
+                "    -t 'mba_max=1200;cpu=1'\n"
+                "        Use SW controller to limit local memory B/W to 1200MBps on core 1\n\n"
+	);
+
+        printf("Example PID configuration strings:\n"
+               "    -I -t 'l3=0xf' -p 23187,567-570\n"
+               "        Specified processes use four L3 cache-ways (mask 0xf)\n"
+               "    -I -t 'mba=50' -k memtester 10M\n"
+               "        Restrict memory B/W availability to 50%% for the "
+               "memtester application (using PID allocation)\n\n");
+
 
 	printf("Example CPUs configuration string:\n"
 		"    -c 0-3,4,5\n"
@@ -257,16 +289,16 @@ print_usage(char *prgname, unsigned short_usage)
 
 	printf("Example RESET configuration string:\n"
 		"    -r 0-3,4,5\n"
-		"        reset CAT for CPUs 0,1,2,3,4,5\n\n");
+		"        reset allocation for CPUs 0,1,2,3,4,5\n\n");
 
 	printf("Example usage of RESET option:\n"
 		"    -t 'l3=0xf;cpu=0-2' -t 'l3=0xf0;cpu=3,4,5' -c 0-5 -p $BASHPID\n"
-		"        Configure CAT and CPU affinity for BASH process\n\n"
+		"        Configure allocation and CPU affinity for BASH process\n\n"
 		"    -r 0-5 -t 'l3=0xff;cpu=0-5' -c 0-5 -p $BASHPID\n"
-		"        Change CAT configuration of CPUs used by BASH "
+		"        Change allocation configuration of CPUs used by BASH "
 		"process\n\n"
 		"    -r 0-5 -p $BASHPID\n"
-		"        Reset CAT configuration of CPUs used by BASH "
+		"        Reset allocation configuration of CPUs used by BASH "
 		"process\n\n");
 }
 /**
@@ -276,6 +308,7 @@ print_usage(char *prgname, unsigned short_usage)
  * @param [in] f_t flag for -t arguments
  * @param [in] f_c flag for -c argument
  * @param [in] f_p flag for -p argument
+ * @param [in] f_i flag for -I argument
  * @param [in] cmd flag for command to be executed
  *
  * @return Operation status
@@ -284,11 +317,69 @@ print_usage(char *prgname, unsigned short_usage)
  */
 static int
 validate_args(const int f_r, __attribute__((unused)) const int f_t,
-		const int f_c, const int f_p, const int cmd)
+              const int f_c, const int f_p, const int f_i, const int cmd)
 {
-	return (f_c && !f_p && cmd) ||
-		(f_c && f_p && !cmd) ||
-		(f_r && f_p && !cmd);
+        unsigned i;
+        int f_n = 0; /**< non cpu (pid) config flag */
+        int f_sc = 0; /**< mba_max config flag */
+
+        for (i = 0; i < g_cfg.config_count; i++) {
+                if (g_cfg.config[i].pid_cfg)
+                        f_n++;
+                if (g_cfg.config[i].mba.ctrl)
+                        f_sc++;
+                /* Validate that only 1 pid config selected */
+                if (f_n > 1) {
+                        fprintf(stderr, "Only 1 PID config allowed!\n");
+                        return 0;
+                }
+                /* Validate that only 1 MBA SC configured */
+                if (f_sc > 1 && !f_i) {
+                        fprintf(stderr, "Only 1 MBA SC config allowed!\n");
+                        return 0;
+                }
+        }
+
+	return (f_c && !f_p && cmd && !f_n) ||
+		(f_c && f_p && !cmd && !f_n) ||
+		(f_r && f_p && !cmd) ||
+		(f_i && f_n && !f_p && cmd) ||
+		(f_i && f_n && f_p && !cmd);
+}
+
+/**
+ * @brief Parse selected PIDs and add to PID table
+ *
+ * @param pidstr string containing list of PIDs to parse
+ *
+ * @return Operation status
+ * @retval 0 on success
+ * @retval negative on error
+ */
+static int
+parse_pids(char *pidstr)
+{
+	unsigned i, n = 0;
+        uint64_t pids[RDT_MAX_PIDS];
+
+        if (pidstr == NULL)
+                return -EINVAL;
+
+        n = strlisttotab(pidstr, pids, DIM(pids));
+        if (n == 0)
+                return -EINVAL;
+
+        if (n > (RDT_MAX_PIDS - g_cfg.pid_count)) {
+                fprintf(stderr, "Too many PIDs selected!"
+                        "Max is %d...\n", (int)RDT_MAX_PIDS);
+                return -EINVAL;
+        }
+
+        /* Add selected PID's to config PID table */
+        for (i = 0; i < n; i++)
+                g_cfg.pids[g_cfg.pid_count++] = (pid_t) pids[i];
+
+        return 0;
 }
 
 /**
@@ -315,48 +406,54 @@ parse_args(int argc, char **argv)
 		{ "rdt",	required_argument,	0, 't' },
 		{ "sudokeep",	no_argument,		0, 'k' },
 		{ "verbose",	no_argument,		0, 'v' },
+		{ "iface-os",   no_argument,            0, 'I' },
 		{ "help",	no_argument,		0, 'h' },
 		{ NULL, 0, 0, 0 } };
 
 	while ((opt = getopt_long(argc, argvopt,
-                                  "+c:p:r:t:kvh", lgopts, NULL)) != -1) {
-		if (opt == 'c') {
+	                          "+c:p:r:t:kvIh", lgopts, NULL)) != -1) {
+		switch (opt) {
+		case 'c':
 			retval = parse_cpu(optarg);
 			if (retval != 0) {
 				fprintf(stderr, "Invalid CPU parameters!\n");
 				goto exit;
 			}
-		} else if (opt == 'p') {
-			char *tailp = NULL;
-
-			errno = 0;
-			g_cfg.pid = (pid_t) strtol(optarg, &tailp, 10);
-			if (NULL == tailp || *tailp != '\0' || errno != 0 ||
-					optarg == tailp || 0 == g_cfg.pid) {
-				fprintf(stderr, "Invalid PID parameter!\n");
-				retval = -EINVAL;
+			break;
+		case 'p':
+			retval = parse_pids(optarg);
+			if (retval != 0) {
+				fprintf(stderr, "Invalid PID parameters!\n");
 				goto exit;
 			}
-		} else if (opt == 'r') {
+			break;
+		case 'r':
 			retval = parse_reset(optarg);
 			if (retval != 0) {
 				fprintf(stderr, "Invalid RESET parameters!\n");
 				goto exit;
 			}
-		} else if (opt == 't') {
+			break;
+		case 't':
 			retval = parse_rdt(optarg);
 			if (retval != 0) {
 				fprintf(stderr, "Invalid RDT parameters!\n");
 				goto exit;
 			}
-		} else if (opt == 'k') {
+			break;
+		case 'k':
 			g_cfg.sudo_keep = 1;
-		} else if (opt == 'v') {
+			break;
+		case 'v':
 			g_cfg.verbose = 1;
-		} else if (opt == '?') {
+			break;
+		case '?':
 			retval = -EINVAL;
 			goto exit;
-		} else if (opt == 'h') {
+		case 'I':
+			g_cfg.interface = PQOS_INTER_OS;
+			break;
+		case 'h':
 			retval = -EAGAIN;
 			goto exit;
 		}
@@ -367,12 +464,103 @@ exit:
 }
 
 /**
+ * @brief Shut down all submodules
+ */
+static void
+rdtset_fini(void)
+{
+        mba_sc_fini();
+        alloc_fini();
+}
+
+/**
+ * @brief Reverts settings deinitializes submodules
+ */
+static void
+rdtset_exit(void)
+{
+        mba_sc_exit();
+        alloc_exit();
+
+        rdtset_fini();
+}
+
+/**
+ * @brief Signal handler to do clean-up on exit on signal
+ *
+ * @param [in] signum signal
+ */
+static void
+signal_handler(int signum)
+{
+        if (signum == SIGINT || signum == SIGTERM) {
+                printf("\nRDTSET: Signal %d received, preparing to exit...\n",
+                       signum);
+
+                rdtset_exit();
+
+                /* exit with the expected status */
+                signal(signum, SIG_DFL);
+                kill(getpid(), signum);
+        }
+}
+
+/**
+ * @brief Initialize rdtset submodules
+ *
+ * @return Operation status
+ * @retval EXIT_SUCCESS on success
+ * @retval EXIT_FAILURE on error
+ */
+static int
+rdtset_init(void)
+{
+        int ret;
+
+        /* Initialize the PQoS library and configure allocation */
+        ret = alloc_init();
+        if (ret < 0) {
+                fprintf(stderr, "%s,%s:%d RDTSET: allocation init failed!\n",
+                        __FILE__, __func__, __LINE__);
+                ret = -EFAULT;
+                goto err;
+        }
+
+        /* Initialize MBA SW controller */
+        if (mba_sc_mode()) {
+                ret = mba_sc_init();
+                if (ret < 0) {
+                        fprintf(stderr, "%s,%s:%d MBA SC init failed!\n",
+                                __FILE__, __func__, __LINE__);
+                        ret = -EFAULT;
+                        goto err;
+                }
+        }
+
+        signal(SIGINT, signal_handler);
+        signal(SIGTERM, signal_handler);
+
+        ret = atexit(rdtset_exit);
+        if (ret != 0) {
+                ret = -EFAULT;
+                fprintf(stderr, "%s,%s:%d Cannot set exit function\n",
+                        __FILE__, __func__, __LINE__);
+                goto err;
+        }
+
+        return 0;
+ err:
+        rdtset_fini();
+        return ret;
+}
+
+/**
  * @brief main function for rdtset
  *
  * Parses cmd line args and validates them,
- * initializes PQoS lib and configures CAT,
+ * initializes PQoS lib and configures CAT/MBA,
  * sets core affinity for executed command process or provided PID,
- * when running command, resets CAT configuration on exit.
+ * when running command, resets allocation configuration on exit.
  *
  * @param [in] argc number of args
  * @param [in] argv args
@@ -404,7 +592,8 @@ main(int argc, char **argv)
 	if (!validate_args(0 != CPU_COUNT(&g_cfg.reset_cpuset),
 			0 != g_cfg.config_count,
 			0 != CPU_COUNT(&g_cfg.cpu_aff_cpuset),
-			0 != g_cfg.pid,
+			0 != g_cfg.pid_count,
+                        0 != g_cfg.interface,
 			0 != g_cfg.command)) {
 		fprintf(stderr, "Incorrect invocation!\n");
 		print_usage(argv[0], 1);
@@ -417,36 +606,34 @@ main(int argc, char **argv)
 		print_cmd_line_cpu_config();
 	}
 
-	/* Initialize the PQoS library and configure CAT */
-	ret = cat_init();
-	if (ret < 0) {
-		fprintf(stderr, "%s,%s:%d CAT init failed!\n",
-				__FILE__, __func__, __LINE__);
-		exit(EXIT_FAILURE);
-	}
+        ret = rdtset_init();
+        if (ret < 0)
+                exit(EXIT_FAILURE);
 
 	/* reset COS association */
 	if (0 != CPU_COUNT(&g_cfg.reset_cpuset)) {
 		if (g_cfg.verbose)
-			printf("CAT: Resetting CAT configuration...\n");
+			printf("Allocation: Resetting allocation "
+				"configuration...\n");
 
-		ret = cat_reset();
+		ret = alloc_reset();
 		if (ret != 0) {
-			fprintf(stderr, "CAT: Failed to reset COS association!"
-				"\n");
+			fprintf(stderr, "Allocation: Failed to reset COS "
+				"association!\n");
 			exit(EXIT_FAILURE);
 		}
 	}
 
-	/* configure CAT */
+	/* configure CAT/MBA */
 	if (0 != g_cfg.config_count) {
 		if (g_cfg.verbose)
-			printf("CAT: Configuring CAT...\n");
+			printf("Allocation: Configuring allocation...\n");
 
-		ret = cat_configure();
+                ret = alloc_configure();
 		if (ret != 0) {
-			fprintf(stderr, "CAT: Failed to configure CAT!\n");
-			cat_fini();
+			fprintf(stderr, "Allocation: Failed to configure "
+				"allocation!\n");
+			alloc_fini();
 			_Exit(EXIT_FAILURE);
 		}
 	}
@@ -461,31 +648,46 @@ main(int argc, char **argv)
 	}
 
 	/* set core affinity */
-	if (0 != g_cfg.pid && 0 != CPU_COUNT(&g_cfg.cpu_aff_cpuset)) {
-		if (g_cfg.verbose)
-			printf("PID: Setting CPU affinity...\n");
+	if (0 != g_cfg.pid_count && 0 != CPU_COUNT(&g_cfg.cpu_aff_cpuset)) {
+                unsigned i;
 
-		if (0 != set_affinity(g_cfg.pid)) {
-			fprintf(stderr, "%s,%s:%d Failed to set core "
-				"affinity!\n", __FILE__, __func__,
-				__LINE__);
-			exit(EXIT_FAILURE);
-		}
-	}
+                if (g_cfg.verbose)
+                        printf("PID: Setting CPU affinity...\n");
 
-	if (0 != g_cfg.command)
+                for (i = 0; i < g_cfg.pid_count; i++)
+                        if (0 != set_affinity(g_cfg.pids[i])) {
+                                fprintf(stderr, "%s,%s:%d Failed to set core "
+                                        "affinity for pid %d!\n", __FILE__,
+                                        __func__, __LINE__, (int)g_cfg.pids[i]);
+                                rdtset_exit();
+                                exit(EXIT_FAILURE);
+                        }
+        }
+
+        if (mba_sc_mode()) {
+                mba_sc_main(child);
+
+        } else if (0 != g_cfg.command) {
+                int status = EXIT_FAILURE;
+                /* Wait for child */
+                waitpid(child, &status, 0);
+                if (EXIT_SUCCESS != status)
+                        exit(EXIT_FAILURE);
+        }
+
+	if (0 != g_cfg.command || mba_sc_mode())
 		/*
-		 * If we were running some command, do clean-up.
-		 * Clean-up function is executed on process exit.
-		 * (cat_exit() registered with atexit(...))
+		 * If we were running some command or doing MBA SW control,
+		 * do clean-up. Clean-up function is executed on process exit.
+		 * (rdtset_exit() registered with atexit(...))
 		 **/
 		exit(EXIT_SUCCESS);
 	else {
 		/*
-		 * If we were doing operation on PID or RESET,
+		 * If we were doing allocation only operation on PID or RESET,
 		 * just deinit libpqos
 		 **/
-		cat_fini();
+		rdtset_fini();
 		_Exit(EXIT_SUCCESS);
 	}
 }

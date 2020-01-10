@@ -1,7 +1,7 @@
 /*
  * BSD LICENSE
  *
- * Copyright(c) 2015 Intel Corporation. All rights reserved.
+ * Copyright(c) 2015-2019 Intel Corporation. All rights reserved.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -70,7 +70,7 @@ perf_setup_counter(struct perf_event_attr *attr,
  * @param counter_fd fd used to access the perf counters
  *
  * @return Operational status
- * @retval PQOS_RETVAL_OK on sucess
+ * @retval PQOS_RETVAL_OK on success
  */
 int
 perf_shutdown_counter(int counter_fd);
@@ -81,7 +81,7 @@ perf_shutdown_counter(int counter_fd);
  * @param counter_fd fd used to access the perf counter
  *
  * @return Operational status
- * @retval PQOS_RETVAL_OK on sucess
+ * @retval PQOS_RETVAL_OK on success
  */
 int
 perf_start_counter(int counter_fd);
@@ -92,7 +92,7 @@ perf_start_counter(int counter_fd);
  * @param counter_fd fd used to access the perf counter
  *
  * @return Operational status
- * @retval PQOS_RETVAL_OK on sucess
+ * @retval PQOS_RETVAL_OK on success
  */
 int
 perf_stop_counter(int counter_fd);
@@ -104,7 +104,7 @@ perf_stop_counter(int counter_fd);
  * @param value pointer to variable to store counter value
  *
  * @return Operational status
- * @retval PQOS_RETVAL_OK on sucess
+ * @retval PQOS_RETVAL_OK on success
  */
 int
 perf_read_counter(int counter_fd, uint64_t *value);

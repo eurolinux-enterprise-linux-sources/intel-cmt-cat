@@ -1,7 +1,7 @@
 /*
  * BSD LICENSE
  *
- * Copyright(c) 2014-2016 Intel Corporation. All rights reserved.
+ * Copyright(c) 2014-2019 Intel Corporation. All rights reserved.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -49,15 +49,15 @@ extern "C" {
 /**
  * @brief Initializes CPU information module
  *
- * CPU topology detection method is OS dependant.
+ * CPU topology detection method is OS dependent.
  *
  * @param [out] topology place to store pointer to CPU topology data
  *
  * @return Operation status
  * @retval 0 success
- * @retval EINVAL invalid argument
- * @retval EPERM cpuinfo already initialized
- * @retval EFAULT error building & discovering the topology
+ * @retval -EINVAL invalid argument
+ * @retval -EPERM cpuinfo already initialized
+ * @retval -EFAULT error building & discovering the topology
  */
 int cpuinfo_init(const struct pqos_cpuinfo **topology);
 
@@ -66,7 +66,7 @@ int cpuinfo_init(const struct pqos_cpuinfo **topology);
  *
  * @return Operation status
  * @retval 0 success
- * @retval EPERM cpuinfo not initialized
+ * @retval -EPERM cpuinfo not initialized
  */
 int cpuinfo_fini(void);
 

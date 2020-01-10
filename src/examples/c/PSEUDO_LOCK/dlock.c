@@ -1,7 +1,7 @@
 /*
  * BSD LICENSE
  *
- * Copyright(c) 2016 Intel Corporation. All rights reserved.
+ * Copyright(c) 2016-2019 Intel Corporation. All rights reserved.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -35,6 +35,7 @@
 #include <stdint.h>   /* uint64_t etc. */
 #include <stdlib.h>   /* malloc() */
 #include <string.h>   /* memcpy() */
+#include <types.h>    /* ASSERT() */
 #include <pqos.h>
 #ifdef __linux__
 #include <sched.h>    /* sched_setaffinity() */
@@ -180,6 +181,9 @@ int dlock_init(void *ptr, const size_t size, const int clos, const int cpuid)
         unsigned *sockets = NULL;
         unsigned socket_count = 0, i = 0;
         int ret = 0, res = 0;
+        size_t num_cache_ways = 0;
+        unsigned clos_save = 0;
+
 #ifdef __linux__
         cpu_set_t cpuset_save, cpuset;
 #endif
@@ -283,8 +287,6 @@ int dlock_init(void *ptr, const size_t size, const int clos, const int cpuid)
         /**
          * Compute number of cache ways required for the data
          */
-        size_t num_cache_ways = 0;
-
         res = bytes_to_cache_ways(p_l3ca_cap, size, &num_cache_ways);
         if (res != 0) {
 		ret = -8;
@@ -304,6 +306,8 @@ int dlock_init(void *ptr, const size_t size, const int clos, const int cpuid)
                  * definitions coherent across sockets.
                  */
                 const uint64_t dlock_mask = (1ULL << num_cache_ways) - 1ULL;
+
+                ASSERT(m_num_clos > 0);
                 struct pqos_l3ca cos[m_num_clos];
                 unsigned num = 0, j;
 
@@ -369,8 +373,6 @@ int dlock_init(void *ptr, const size_t size, const int clos, const int cpuid)
         /**
          * Read current cpuid CLOS association and set the new one
          */
-        unsigned clos_save = 0;
-
         res = pqos_alloc_assoc_get(cpuid, &clos_save);
         if (res != PQOS_RETVAL_OK) {
                 printf("pqos_alloc_assoc_get() error!\n");

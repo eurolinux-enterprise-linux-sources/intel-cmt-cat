@@ -1,7 +1,7 @@
 /*
  * BSD LICENSE
  *
- * Copyright(c) 2014-2016 Intel Corporation. All rights reserved.
+ * Copyright(c) 2014-2019 Intel Corporation. All rights reserved.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -127,6 +127,7 @@ print_allocation_config(void)
 		lcores = pqos_cpu_get_cores(p_cpu, sockets[i], &lcount);
 		if (lcores == NULL || lcount == 0) {
 			printf("Error retrieving core information!\n");
+                        free(lcores);
                         free(sockets);
 			return;
 		}
@@ -153,7 +154,7 @@ print_allocation_config(void)
  * @return Number of associations made
  * @retval 0 no association made (nor requested)
  * @retval negative error
- * @retval positive sucess
+ * @retval positive success
  */
 static int
 set_allocation_assoc(void)

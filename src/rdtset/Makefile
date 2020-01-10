@@ -4,7 +4,7 @@
 # @par
 # BSD LICENSE
 #
-# Copyright(c) 2016 Intel Corporation. All rights reserved.
+# Copyright(c) 2016-2019 Intel Corporation. All rights reserved.
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -36,30 +36,35 @@
 ###############################################################################
 
 LIBDIR ?= ../lib
-LDFLAGS = -L$(LIBDIR) -fPIE -z noexecstack -z relro -z now
+LDFLAGS = -L$(LIBDIR) -pie -z noexecstack -z relro -z now
 LDLIBS = -lpqos -lpthread
 CFLAGS = -I$(LIBDIR) \
 	-W -Wall -Wextra -Wstrict-prototypes -Wmissing-prototypes \
 	-Wmissing-declarations -Wold-style-definition -Wpointer-arith \
 	-Wcast-qual -Wundef -Wwrite-strings \
-	-Wformat -Wformat-security -fstack-protector -fPIE -D_FORTIFY_SOURCE=2 \
-	-Wunreachable-code -Wmissing-noreturn -Wsign-compare -Wno-endif-labels \
+	-Wformat -Wformat-security -fstack-protector -fPIE \
+	-Wunreachable-code -Wsign-compare -Wno-endif-labels \
 	-D_GNU_SOURCE
 ifneq ($(EXTRA_CFLAGS),)
 CFLAGS += $(EXTRA_CFLAGS)
+endif
+ifneq ($(EXTRA_LDFLAGS),)
+LDFLAGS += $(EXTRA_LDFLAGS)
 endif
 
 # ICC and GCC options
 ifeq ($(CC),icc)
 else
-CFLAGS += -Wcast-align -Wnested-externs
+CFLAGS += -Wcast-align \
+    -Wnested-externs \
+    -Wmissing-noreturn
 endif
 
 # DEBUG build
 ifeq ($(DEBUG),y)
 CFLAGS += -g -ggdb -O0 -DDEBUG
 else
-CFLAGS += -g -O3
+CFLAGS += -g -O2 -D_FORTIFY_SOURCE=2
 endif
 
 # Needed by initgroups()
@@ -76,7 +81,7 @@ PREFIX ?= /usr/local
 BIN_DIR = $(PREFIX)/bin
 MAN_DIR = $(PREFIX)/man/man8
 
-SRCS = $(wildcard *.c)
+SRCS = $(sort $(wildcard *.c))
 OBJS = $(SRCS:.c=.o)
 DEPFILES = $(SRCS:.c=.d)
 
@@ -116,15 +121,19 @@ CHECKPATCH?=checkpatch.pl
 style:
 	$(CHECKPATCH) --no-tree --no-signoff --emacs \
 	--ignore CODE_INDENT,INITIALISED_STATIC,LEADING_SPACE,SPLIT_STRING,NEW_TYPEDEFS,\
-	UNSPECIFIED_INT,ARRAY_SIZE,BLOCK_COMMENT_STYLE,CONSTANT_COMPARISON \
-	-f rdtset.c -f rdt.c -f rdt.h -f cpu.c -f cpu.h -f common.c -f common.h
+	UNSPECIFIED_INT,ARRAY_SIZE,BLOCK_COMMENT_STYLE,CONSTANT_COMPARISON,\
+	SPDX_LICENSE_TAG \
+	-f rdtset.c -f rdt.c -f rdt.h -f cpu.c -f cpu.h \
+	-f common.c -f common.h \
+	-f mba_sc.h -f mba_sc.c
 
 CPPCHECK?=cppcheck
 .PHONY: cppcheck
 cppcheck:
 	$(CPPCHECK) --enable=warning,portability,performance,unusedFunction,missingInclude \
 	--std=c99 -I$(LIBDIR) --template=gcc --suppress=uninitvar \
-	rdtset.c rdt.c rdt.h cpu.c cpu.h common.c common.h
+	rdtset.c rdt.c rdt.h cpu.c cpu.h common.c common.h \
+	mba_sc.h mba_sc.c
 
 # if target not clean then make dependencies
 ifneq ($(MAKECMDGOALS),clean)

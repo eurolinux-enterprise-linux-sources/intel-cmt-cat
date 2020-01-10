@@ -1,7 +1,7 @@
 /*
  *   BSD LICENSE
  *
- *   Copyright(c) 2016-2017 Intel Corporation. All rights reserved.
+ *   Copyright(c) 2016-2019 Intel Corporation. All rights reserved.
  *   All rights reserved.
  *
  *   Redistribution and use in source and binary forms, with or without
@@ -44,8 +44,8 @@
 extern "C" {
 #endif
 
-#define RDT_MAX_SOCKETS 8
-#define RDT_MAX_L2IDS   32
+#define RDT_MAX_PIDS    128
+#define MAX_OPTARG_LEN  64
 
 #ifndef MIN
 /**
@@ -80,25 +80,26 @@ extern "C" {
 #endif /* !__bitcountl(x) */
 #endif /* __FreeBSD__ */
 
-struct rdt_ca {
+struct rdt_cfg {
 	enum pqos_cap_type type;
 	union {
 		struct pqos_l2ca *l2;
 		struct pqos_l3ca *l3;
+		struct pqos_mba *mba;
 		void *generic_ptr;
 	} u;
 };
 
 /**
- * @brief Creates \a rdt_ca struct from \a pqos_l2ca struct
+ * @brief Creates \a rdt_cfg struct from \a pqos_l2ca struct
  *
  * @param [in] l2 L2 CAT class configuration
  *
- * @return rdt_ca struct
+ * @return rdt_cfg struct
  */
-static inline struct rdt_ca wrap_l2ca(struct pqos_l2ca *l2)
+static inline struct rdt_cfg wrap_l2ca(struct pqos_l2ca *l2)
 {
-	struct rdt_ca result;
+	struct rdt_cfg result;
 
 	result.type = PQOS_CAP_TYPE_L2CA;
 	result.u.l2 = l2;
@@ -106,18 +107,34 @@ static inline struct rdt_ca wrap_l2ca(struct pqos_l2ca *l2)
 }
 
 /**
- * @brief Creates \a rdt_ca struct from \a pqos_l3ca struct
+ * @brief Creates \a rdt_cfg struct from \a pqos_l3ca struct
  *
  * @param [in] l3 L3 CAT class configuration
  *
- * @return rdt_ca struct
+ * @return rdt_cfg struct
  */
-static inline struct rdt_ca wrap_l3ca(struct pqos_l3ca *l3)
+static inline struct rdt_cfg wrap_l3ca(struct pqos_l3ca *l3)
 {
-	struct rdt_ca result;
+	struct rdt_cfg result;
 
 	result.type = PQOS_CAP_TYPE_L3CA;
 	result.u.l3 = l3;
+	return result;
+}
+
+/**
+ * @brief Creates \a rdt_cfg struct from \a pqos_mba struct
+ *
+ * @param [in] mba MBA class configuration
+ *
+ * @return rdt_cfg struct
+ */
+static inline struct rdt_cfg wrap_mba(struct pqos_mba *mba)
+{
+	struct rdt_cfg result;
+
+	result.type = PQOS_CAP_TYPE_MBA;
+	result.u.mba = mba;
 	return result;
 }
 
@@ -125,11 +142,14 @@ struct rdt_config {
 	cpu_set_t cpumask;	/**< CPUs bitmask */
 	struct pqos_l3ca l3;	/**< L3 configuration */
 	struct pqos_l2ca l2;	/**< L2 configuration */
+	struct pqos_mba mba;	/**< MBA configuretion */
+        int pid_cfg;            /**< associate PIDs to this cfg */
 };
 
 /* rdtset command line configuration structure */
 struct rdtset {
-	pid_t pid;			/**< process PID */
+	pid_t pids[RDT_MAX_PIDS];	/**< process ID table */
+        unsigned pid_count;             /**< Num of PIDs selected */
 	struct rdt_config config[CPU_SETSIZE];	/**< RDT configuration */
 	unsigned config_count;		/**< Num of RDT config entries */
 	cpu_set_t cpu_aff_cpuset;	/**< CPU affinity configuration */
@@ -137,9 +157,15 @@ struct rdtset {
 	unsigned sudo_keep:1,		/**< don't drop elevated privileges */
 		 verbose:1,		/**< be verbose */
 		 command:1;		/**< command to be executed detected */
+	enum pqos_interface interface;  /**< pqos interface to use */
 };
 
 struct rdtset g_cfg;
+
+#define DBG(...) do { \
+	if (g_cfg.verbose) \
+		fprintf(stderr, __VA_ARGS__); \
+	} while (0)
 
 /**
  * @brief Parse CPU set string
@@ -170,6 +196,60 @@ int str_to_cpuset(const char *cpustr, const unsigned cpustr_len,
  */
 void cpuset_to_str(char *cpustr, const unsigned cpustr_len,
 		const cpu_set_t *cpumask);
+
+/**
+ * @brief Converts string of characters representing list of
+ *        numbers into table of numbers.
+ *
+ * Allowed formats are:
+ *     0,1,2,3
+ *     0-10,20-18
+ *     1,3,5-8,10,0x10-12
+ *
+ * Numbers can be in decimal or hexadecimal format.
+ *
+ * On error, this functions causes process to exit with FAILURE code.
+ *
+ * @param s string representing list of unsigned numbers.
+ * @param tab table to put converted numeric values into
+ * @param max maximum number of elements that \a tab can accommodate
+ *
+ * @return Number of elements placed into \a tab
+ */
+unsigned
+strlisttotab(char *s, uint64_t *tab, const unsigned max);
+
+/**
+ * @brief Get time in microseconds
+ *
+ * @param tv pointer to timeval structure to be converted
+ *
+ * @return Time un mocroseconds
+ */
+uint64_t
+get_time_usec(void);
+
+/**
+ * @brief Scale MB value to bytes
+ *
+ * @param [in] MB value to be scaled
+ * @return scaled up value in bytes
+ */
+static inline uint64_t mb_to_bytes(const uint64_t mb)
+{
+        return mb * 1024 * 1024;
+}
+
+/**
+ * @brief Scale bytes value to MB
+ *
+ * @param [in] bytes value to be scaled up
+ * @return scaled value in MB
+ */
+static inline uint64_t bytes_to_mb(const uint64_t bytes)
+{
+        return bytes / (1024 * 1024);
+}
 
 #ifdef __cplusplus
 }

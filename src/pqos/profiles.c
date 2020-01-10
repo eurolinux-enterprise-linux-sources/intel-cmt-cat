@@ -1,7 +1,7 @@
 /*
  * BSD LICENSE
  *
- * Copyright(c) 2014-2016 Intel Corporation. All rights reserved.
+ * Copyright(c) 2014-2019 Intel Corporation. All rights reserved.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -169,7 +169,7 @@ static const char * const classes_way20_overlapY_equalN[] = {
 };
 
 /**
- * meat and potatos now :)
+ * meat and potatoes now :)
  */
 struct llc_allocation_config {
         unsigned num_ways;
@@ -287,7 +287,7 @@ static const struct llc_allocation allocation_tab[] = {
 
 void profile_l3ca_list(FILE *fp)
 {
-        unsigned i = 0, j = 0;
+        unsigned i = 0;
 
         ASSERT(fp != NULL);
         if (fp == NULL)
@@ -295,6 +295,7 @@ void profile_l3ca_list(FILE *fp)
 
         for (i = 0; i < DIM(allocation_tab); i++) {
                 const struct llc_allocation *ap = &allocation_tab[i];
+                unsigned j;
 
                 fprintf(fp,
                         "%u)\n"

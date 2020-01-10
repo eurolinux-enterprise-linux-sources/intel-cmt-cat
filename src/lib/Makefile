@@ -4,7 +4,7 @@
 # @par
 # BSD LICENSE
 #
-# Copyright(c) 2014-2016 Intel Corporation. All rights reserved.
+# Copyright(c) 2014-2019 Intel Corporation. All rights reserved.
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -35,17 +35,21 @@
 ###############################################################################
 
 LIB = libpqos
-VERSION = 0.1.6
+VERSION = 3.0.1
+SO_VERSION = 3
 SHARED ?= y
-LDFLAGS = -L. -lpthread -fPIE -z noexecstack -z relro -z now
+LDFLAGS = -L. -lpthread -z noexecstack -z relro -z now
 CFLAGS = -pthread -I./ -D_GNU_SOURCE \
 	-W -Wall -Wextra -Wstrict-prototypes -Wmissing-prototypes \
 	-Wmissing-declarations -Wold-style-definition -Wpointer-arith \
 	-Wcast-qual -Wundef -Wwrite-strings \
-	-Wformat -Wformat-security -fstack-protector -D_FORTIFY_SOURCE=2\
-	-Wunreachable-code -Wmissing-noreturn -Wsign-compare -Wno-endif-labels
+	-Wformat -Wformat-security -fstack-protector \
+	-Wunreachable-code -Wsign-compare -Wno-endif-labels
 ifneq ($(EXTRA_CFLAGS),)
 CFLAGS += $(EXTRA_CFLAGS)
+endif
+ifneq ($(EXTRA_LDFLAGS),)
+LDFLAGS += $(EXTRA_LDFLAGS)
 endif
 
 DOXY_DIRS = doc_api doc_lib
@@ -53,13 +57,15 @@ DOXY_DIRS = doc_api doc_lib
 # ICC and GCC options
 ifeq ($(CC),icc)
 else
-CFLAGS += -Wcast-align -Wnested-externs
+CFLAGS += -Wcast-align \
+    -Wnested-externs \
+    -Wmissing-noreturn
 endif
 
 # so or static build
 ifeq ($(SHARED),y)
 CFLAGS += -fPIC
-LIBNAME = $(LIB)-$(VERSION).so
+LIBNAME = $(LIB).so.$(VERSION)
 LIBPERM = 0755
 else
 CFLAGS += -fPIE
@@ -71,38 +77,40 @@ endif
 ifeq ($(DEBUG),y)
 CFLAGS += -g -ggdb -O0 -DDEBUG
 else
-CFLAGS += -g -O2
+CFLAGS += -g -O2 -D_FORTIFY_SOURCE=2
 endif
 
 # Build targets and dependencies
-SRCS = $(wildcard *.c)
+SRCS = $(sort $(wildcard *.c))
 OBJS = $(SRCS:.c=.o)
 CLEAN_OBJS = $(SRCS:.c=.o)
 
-# On FreeBSD build with NO_PID_API option
+# On FreeBSD build with no OS support
 ifeq ($(shell uname), FreeBSD)
-NO_PID_API=y
-endif
-
-# PID API build option
-ifneq ($(NO_PID_API), n)
-CFLAGS += -DPQOS_NO_PID_API
-OBJS := $(filter-out pidapi.o perf.o,$(OBJS))
+OBJS := $(filter-out perf.o \
+	os_allocation.o \
+	os_cap.o \
+	os_monitoring.o \
+	resctrl.o \
+	resctrl_alloc.o \
+	resctrl_monitoring.o \
+	perf_monitoring.o,$(OBJS))
 endif
 
 HDR = pqos.h
 PREFIX ?= /usr/local
-LIBDIR ?= $(PREFIX)/lib
+LIB_INSTALL_DIR ?= $(PREFIX)/lib
 HDR_DIR ?= $(PREFIX)/include
 DEPFILE = $(LIB).dep
+NOLDCONFIG ?= n
 
 all: $(LIBNAME)
 
 $(LIBNAME): $(OBJS)
 ifeq ($(SHARED),y)
-	$(CC) -shared -Wl,-soname,$(LIBNAME) -o $(LIBNAME) $^ -lc
-	ln -f -s $(LIB).so.0 $(LIB).so
-	ln -f -s $(LIBNAME) $(LIB).so.0
+	$(CC) $(LDFLAGS) -shared -Wl,-soname,$(LIB).so.$(SO_VERSION) -o $(LIBNAME) $^ -lc
+	ln -f -s $(LIBNAME) $(LIB).so.$(SO_VERSION)
+	ln -f -s $(LIB).so.$(SO_VERSION) $(LIB).so
 else
 	$(AR) crvsD $@ $^
 endif
@@ -110,26 +118,31 @@ endif
 install: $(LIBNAME)
 # Install on FreeBSD
 ifeq ($(shell uname), FreeBSD)
-	install -d $(LIBDIR)
-	install -m $(LIBPERM) $(LIBNAME) $(LIBDIR)
+	install -d $(LIB_INSTALL_DIR)
+	install -m $(LIBPERM) $(LIBNAME) $(LIB_INSTALL_DIR)
 	install -m 0644 $(HDR) $(HDR_DIR)
 # Install on Linux
 else
-	install -m $(LIBPERM) $(LIBNAME) -D $(LIBDIR)/$(LIBNAME)
+	install -m $(LIBPERM) $(LIBNAME) -D $(LIB_INSTALL_DIR)/$(LIBNAME)
 	install -m 0644 $(HDR) -D $(HDR_DIR)/$(HDR)
 endif
 
 # Create symlinks to DSO
 ifeq ($(SHARED),y)
-	ln -f -s $(LIBDIR)/$(LIB).so.0 $(LIBDIR)/$(LIB).so
-	ln -f -s $(LIBDIR)/$(LIBNAME) $(LIBDIR)/$(LIB).so.0
+	cd $(LIB_INSTALL_DIR); \
+		ln -f -s $(LIB).so.$(VERSION) $(LIB).so.$(SO_VERSION); \
+		ln -f -s $(LIB).so.$(SO_VERSION) $(LIB).so
+ifneq ($(NOLDCONFIG),y)
 	ldconfig
+endif
 endif
 
 uninstall:
-	-rm $(LIBDIR)/libpqos*
+	-rm $(LIB_INSTALL_DIR)/libpqos*
 ifeq ($(SHARED),y)
+ifneq ($(NOLDCONFIG),y)
 	ldconfig
+endif
 endif
 
 DEPFILES = $(SRCS:.c=.d)
@@ -146,7 +159,6 @@ help:
 	@echo "PQoS library make targets:"
 	@echo "    make              - build shared library"
 	@echo "    make SHARED=n     - build static library"
-	@echo "    make NO_PID_API=n - build library with PID monitoring suppport"
 	@echo "    make DEBUG=y      - build shared library for debugging"
 	@echo "    make install      - install library (accepts PREFIX=/some/where)"
 	@echo "    make uninstall    - uninstall library (accepts PREFIX=/some/where)"
@@ -172,15 +184,27 @@ CHECKPATCH?=checkpatch.pl
 style:
 	$(CHECKPATCH) --no-tree --no-signoff --emacs \
 	--ignore CODE_INDENT,INITIALISED_STATIC,LEADING_SPACE,SPLIT_STRING,\
-	UNSPECIFIED_INT,ARRAY_SIZE,BLOCK_COMMENT_STYLE,GLOBAL_INITIALISERS \
-	-f cap.c -f cap.h -f allocation.c -f perf.c -f perf.h \
-	-f allocation.h -f monitoring.c -f monitoring.h \
-	-f log.c -f log.h -f types.h -f machine.c -f machine.h \
-	-f utils.c -f cpuinfo.h -f pidapi.c -f pidapi.h
-	$(CHECKPATCH) --no-tree --no-signoff --emacs \
-	--ignore CODE_INDENT,INITIALISED_STATIC,LEADING_SPACE,SPLIT_STRING,\
-	NEW_TYPEDEFS,UNSPECIFIED_INT,BLOCK_COMMENT_STYLE \
-	-f pqos.h -f cpuinfo.c
+	NEW_TYPEDEFS,UNSPECIFIED_INT,BLOCK_COMMENT_STYLE,\
+	SPDX_LICENSE_TAG,ARRAY_SIZE,EMBEDDED_FUNCTION_NAME,\
+	SYMBOLIC_PERMS \
+	-f pqos.h \
+	-f allocation.h -f allocation.c \
+	-f api.h -f api.c \
+	-f cap.h -f cap.c \
+	-f cpuinfo.h -f cpuinfo.c \
+	-f log.h -f log.c \
+	-f machine.h -f machine.c \
+	-f monitoring.h -f monitoring.c \
+	-f os_allocation.h -f os_allocation.c \
+	-f os_cap.h -f os_cap.c \
+	-f os_monitoring.h os_monitoring.c \
+	-f perf.h -f perf.c \
+	-f perf_monitoring.h -f perf_monitoring.c \
+	-f resctrl.h -f resctrl.c \
+	-f resctrl_monitoring.h -f resctrl_monitoring.c \
+	-f resctrl_alloc.h -f resctrl_alloc.c \
+	-f types.h \
+	-f utils.h -f utils.c
 
 CPPCHECK?=cppcheck
 .PHONY: cppcheck
@@ -188,10 +212,17 @@ cppcheck:
 	$(CPPCHECK) \
 	--enable=warning,portability,performance,missingInclude \
 	--std=c99 --template=gcc \
-	cap.c cap.h allocation.c perf.c perf.h \
+	api.c api.h cap.c cap.h allocation.c perf.c perf.h \
 	allocation.h monitoring.c monitoring.h \
 	log.c log.h types.h machine.c machine.h \
-	utils.c cpuinfo.c cpuinfo.h pidapi.c pidapi.h
+	utils.c utils.h \
+	cpuinfo.c cpuinfo.h os_allocation.h os_allocation.c \
+	os_cap.h os_cap.c \
+	os_monitoring.h os_monitoring.c \
+	perf_monitoring.h perf_monitoring.c \
+	resctrl_alloc.h resctrl_alloc.c \
+	resctrl.h resctrl.c \
+	resctrl_monitoring.h resctrl_monitoring.c
 
 # if target not clean or rinse then make dependencies
 ifneq ($(MAKECMDGOALS),clean)

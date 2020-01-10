@@ -1,7 +1,7 @@
 /*
  * BSD LICENSE
  *
- * Copyright(c) 2014-2017 Intel Corporation. All rights reserved.
+ * Copyright(c) 2014-2019 Intel Corporation. All rights reserved.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -75,6 +75,16 @@ extern "C" {
 #define PQOS_MAX_L2IDS        32
 #define PQOS_MAX_SOCKET_CORES 64
 #define PQOS_MAX_CORES        (PQOS_MAX_SOCKET_CORES*PQOS_MAX_SOCKETS)
+
+/**
+ * Maintains alloc option - allocate cores or task id's
+ */
+extern int alloc_pid_flag;
+
+/**
+ * Selected library interface
+ */
+extern enum pqos_interface sel_interface;
 
 /**
  * @brief Converts string into 64-bit unsigned number.

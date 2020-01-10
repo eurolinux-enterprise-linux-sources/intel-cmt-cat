@@ -1,7 +1,7 @@
 /*
  *   BSD LICENSE
  *
- *   Copyright(c) 2016-2017 Intel Corporation. All rights reserved.
+ *   Copyright(c) 2016-2019 Intel Corporation. All rights reserved.
  *   All rights reserved.
  *
  *   Redistribution and use in source and binary forms, with or without
@@ -43,6 +43,7 @@
 
 #include <pqos.h>
 
+#include "mba_sc.h"
 #include "rdt.h"
 #include "cpu.h"
 
@@ -50,71 +51,123 @@ static const struct pqos_cap *m_cap;
 static const struct pqos_cpuinfo *m_cpu;
 static const struct pqos_capability *m_cap_l2ca;
 static const struct pqos_capability *m_cap_l3ca;
+static const struct pqos_capability *m_cap_mba;
 
 /**
- * @brief Prints L2 or L3 configuration in \a ca
+ * @brief Prints L2, L3 or MBA configuration in \a cfg
  *
  * @param [in] stream to write output to
- * @param [in] ca CAT COS configuration
+ * @param [in] cfg COS configuration
  */
 static void
-rdt_ca_print(FILE *stream, const struct rdt_ca ca)
+rdt_cfg_print(FILE *stream, const struct rdt_cfg cfg)
 {
-	if (!(PQOS_CAP_TYPE_L2CA == ca.type || PQOS_CAP_TYPE_L3CA == ca.type) ||
-            NULL == ca.u.generic_ptr)
+	if (NULL == cfg.u.generic_ptr)
 		return;
 
-	if (PQOS_CAP_TYPE_L2CA == ca.type)
-		fprintf(stream, "MASK: 0x%llx",
-			(unsigned long long) ca.u.l2->ways_mask);
-	else if (ca.u.l3->cdp == 1)
-		fprintf(stream, "code MASK: 0x%llx, data MASK: 0x%llx",
-			(unsigned long long) ca.u.l3->u.s.code_mask,
-			(unsigned long long) ca.u.l3->u.s.data_mask);
-	else
-		fprintf(stream, "MASK: 0x%llx",
-			(unsigned long long) ca.u.l3->u.ways_mask);
+	switch (cfg.type) {
+	case PQOS_CAP_TYPE_L2CA:
+		if (cfg.u.l2->cdp == 1)
+			fprintf(stream, "code MASK: 0x%llx, data MASK: 0x%llx",
+				(unsigned long long) cfg.u.l2->u.s.code_mask,
+				(unsigned long long) cfg.u.l2->u.s.data_mask);
+		else
+			fprintf(stream, "MASK: 0x%llx",
+				(unsigned long long) cfg.u.l2->u.ways_mask);
+		break;
+
+	case PQOS_CAP_TYPE_L3CA:
+		if (cfg.u.l3->cdp == 1)
+			fprintf(stream, "code MASK: 0x%llx, data MASK: 0x%llx",
+				(unsigned long long) cfg.u.l3->u.s.code_mask,
+				(unsigned long long) cfg.u.l3->u.s.data_mask);
+		else
+			fprintf(stream, "MASK: 0x%llx",
+				(unsigned long long) cfg.u.l3->u.ways_mask);
+		break;
+
+	case PQOS_CAP_TYPE_MBA:
+		fprintf(stream, "RATE: %u", cfg.u.mba->mb_max);
+		break;
+
+	default:
+		break;
+	}
 }
 /**
- * @brief Gets short string representation of configuration type of \a ca
+ * @brief Gets short string representation of configuration type of \a cfg
  *
- * @param [in] ca CAT COS configuration
+ * @param [in] cfg COS allocation configuration
  *
  * @return String representation of configuration type
  */
 static const char *
-rdt_ca_get_type_str(const struct rdt_ca ca)
+rdt_cfg_get_type_str(const struct rdt_cfg cfg)
 {
-	if (!(PQOS_CAP_TYPE_L2CA == ca.type || PQOS_CAP_TYPE_L3CA == ca.type) ||
-            NULL == ca.u.generic_ptr)
+	if (NULL == cfg.u.generic_ptr)
 		return "ERROR!";
 
-	return PQOS_CAP_TYPE_L2CA == ca.type ? "L2" : "L3";
+	switch (cfg.type) {
+	case PQOS_CAP_TYPE_L2CA:
+		return "L2";
+
+	case PQOS_CAP_TYPE_L3CA:
+		return "L3";
+
+	case PQOS_CAP_TYPE_MBA:
+		return "MBA";
+
+	default:
+		return "ERROR!";
+	}
 }
 
 /**
- * @brief Validates configuration in \a ca
+ * @brief Validates configuration in \a cfg
  *
- * @param [in] ca CAT COS configuration
+ * @param [in] cfg COS configuration
  *
  * @return Result
  * @retval 1 on success
  * @retval 0 on failure
  */
 static int
-rdt_ca_is_valid(const struct rdt_ca ca)
+rdt_cfg_is_valid(const struct rdt_cfg cfg)
 {
-	if (!(PQOS_CAP_TYPE_L2CA == ca.type || PQOS_CAP_TYPE_L3CA == ca.type) ||
-            NULL == ca.u.generic_ptr)
+	if (cfg.u.generic_ptr == NULL)
 		return 0;
 
-	if (PQOS_CAP_TYPE_L2CA == ca.type)
-		return NULL != ca.u.l2 && 0 != ca.u.l2->ways_mask;
+	switch (cfg.type) {
+	case PQOS_CAP_TYPE_L2CA:
+		/* Validate L2 CAT configuration.
+		 *  - If CDP is enabled code_mask and data_mask must be set
+		 *  - If CDP is not enabled ways_mask must be set
+		 */
+		return cfg.u.l2 != NULL &&
+			((cfg.u.l2->cdp == 1 && cfg.u.l2->u.s.code_mask != 0 &&
+			cfg.u.l2->u.s.data_mask != 0) ||
+			(cfg.u.l2->cdp == 0 && cfg.u.l2->u.ways_mask != 0));
 
-	return NULL != ca.u.l3 &&
-		((1 == ca.u.l3->cdp && 0 != ca.u.l3->u.s.code_mask &&
-                  0 != ca.u.l3->u.s.data_mask) ||
-                 (0 == ca.u.l3->cdp && 0 != ca.u.l3->u.ways_mask));
+	case PQOS_CAP_TYPE_L3CA:
+		/* Validate L3 CAT configuration.
+		 *  - If CDP is enabled code_mask and data_mask must be set
+		 *  - If CDP is not enabled ways_mask must be set
+		 */
+		return cfg.u.l3 != NULL &&
+			((cfg.u.l3->cdp == 1 && cfg.u.l3->u.s.code_mask != 0 &&
+			cfg.u.l3->u.s.data_mask != 0) ||
+			(cfg.u.l3->cdp == 0 && cfg.u.l3->u.ways_mask != 0));
+
+	case PQOS_CAP_TYPE_MBA:
+		return cfg.u.mba != NULL && cfg.u.mba->mb_max > 0 &&
+			((cfg.u.mba->ctrl == 0 && cfg.u.mba->mb_max <= 100) ||
+			cfg.u.mba->ctrl == 1);
+
+	default:
+		break;
+	}
+
+	return 0;
 }
 
 /**
@@ -163,8 +216,9 @@ is_contiguous(const char *cat_type, const uint64_t bitmask)
 	}
 
 	if (bits_count(bitmask) != j) {
-		fprintf(stderr, "CAT: %s mask 0x%llx is not contiguous.\n",
-			cat_type, (unsigned long long) bitmask);
+		fprintf(stderr, "Allocation: %s CAT mask 0x%llx is not "
+			"contiguous.\n", cat_type,
+			(unsigned long long) bitmask);
 		return 0;
 	}
 
@@ -172,37 +226,79 @@ is_contiguous(const char *cat_type, const uint64_t bitmask)
 }
 
 /**
- * @brief Converts hex string \a xstr to UINT \a value
+ * @brief Function to get the highest resource ID (socket/cluster)
  *
- * @param [in] xstr hex string
- * @param [out] value UINT value
+ * @param technology used to determine if res ID should be socket or cluster
+ *
+ * @return highest resource ID
+ * @retval positive on success
+ * @retval 0 on error
+ */
+static int
+get_max_res_id(unsigned technology)
+{
+        unsigned num_ids, max = 0, *ids = NULL;
+
+        if (m_cpu == NULL || technology == 0)
+                return 0;
+
+        /* get number of L2IDs */
+        if (technology & (1 << PQOS_CAP_TYPE_L2CA)) {
+                ids = pqos_cpu_get_l2ids(m_cpu, &num_ids);
+                if (ids == NULL)
+                        return 0;
+
+                max = num_ids > max ? num_ids : max;
+                free(ids);
+        }
+        /* get number of sockets */
+        if (technology & (1 << PQOS_CAP_TYPE_L3CA) ||
+            technology & (1 << PQOS_CAP_TYPE_MBA)) {
+                ids = pqos_cpu_get_sockets(m_cpu, &num_ids);
+                if (ids == NULL)
+                        return 0;
+
+                max = num_ids > max ? num_ids : max;
+                free(ids);
+        }
+        return max;
+}
+
+/**
+ * @brief Converts string \a str to UINT
+ *
+ * @param [in] str string
+ * @param [in] base numerical base
+ * @param [out] value INT value
  *
  * @return number of parsed characters
- * @retval >0 on success
+ * @retval positive on success
  * @retval negative on error (-errno)
  */
 static int
-xstr_to_uint(const char *xstr, uint64_t *value)
+str_to_uint64(const char *str, int base, uint64_t *value)
 {
-	const char *xstr_start = xstr;
-	char *xstr_end = NULL;
+	const char *str_start = str;
+	char *str_end = NULL;
 
-	if (NULL == xstr || NULL == value)
+	if (NULL == str || NULL == value)
 		return -EINVAL;
 
-	while (isblank(*xstr_start))
-		xstr_start++;
+	while (isblank(*str_start))
+		str_start++;
 
-	if (!isxdigit(*xstr_start))
+	if (base == 10 && !isdigit(*str_start))
+		return -EINVAL;
+
+	if (base == 16 && !isxdigit(*str_start))
 		return -EINVAL;
 
 	errno = 0;
-	*value = strtoul(xstr_start, &xstr_end, 16);
-	if (errno != 0 || xstr_end == NULL || xstr_end == xstr_start ||
-            *value == 0)
+	*value = strtoull(str_start, &str_end, base);
+	if (errno != 0 || str_end == NULL || str_end == str_start)
 		return -EINVAL;
 
-	return xstr_end - xstr;
+	return str_end - str;
 }
 
 /**
@@ -230,7 +326,7 @@ parse_mask_set(const char *cbm, const int force_dual_mask, uint64_t *mask,
 		while (!isxdigit(*cbm_start))
 			cbm_start++;
 
-		offset = xstr_to_uint(cbm_start, cmask);
+		offset = str_to_uint64(cbm_start, 16, cmask);
 		if (offset < 0)
 			goto err;
 
@@ -245,7 +341,7 @@ parse_mask_set(const char *cbm, const int force_dual_mask, uint64_t *mask,
 		cbm_start++;
 	}
 
-	offset = xstr_to_uint(cbm_start, mask);
+	offset = str_to_uint64(cbm_start, 16, mask);
 	if (offset < 0)
 		goto err;
 
@@ -258,8 +354,11 @@ parse_mask_set(const char *cbm, const int force_dual_mask, uint64_t *mask,
 int
 parse_reset(const char *cpustr)
 {
-	unsigned cpustr_len = strlen(cpustr);
 	int ret = 0;
+	const unsigned cpustr_len = strnlen(cpustr, MAX_OPTARG_LEN);
+
+	if (cpustr_len == MAX_OPTARG_LEN)
+		return -EINVAL;
 
 	ret = str_to_cpuset(cpustr, cpustr_len, &g_cfg.reset_cpuset);
 	return ret > 0 ? 0 : ret;
@@ -276,7 +375,7 @@ parse_reset(const char *cpustr)
  * @retval negative on error (-errno)
  */
 static int
-rdt_ca_str_to_cbm(const char *param, struct rdt_ca ca)
+rdt_ca_str_to_cbm(const char *param, struct rdt_cfg ca)
 {
 	uint64_t mask = 0, mask2 = 0;
 	int ret, force_dual_mask;
@@ -290,16 +389,20 @@ rdt_ca_str_to_cbm(const char *param, struct rdt_ca ca)
 	if (ret < 0)
 		return -EINVAL;
 
-	if (0 == mask || is_contiguous(rdt_ca_get_type_str(ca), mask) == 0)
+	if (mask == 0 || is_contiguous(rdt_cfg_get_type_str(ca), mask) == 0)
+		return -EINVAL;
+
+	if (mask2 != 0 && is_contiguous(rdt_cfg_get_type_str(ca), mask2) == 0)
 		return -EINVAL;
 
 	if (PQOS_CAP_TYPE_L2CA == ca.type) {
-		if (mask2 != 0)
-			return -EINVAL;
-		ca.u.l2->ways_mask = mask;
+		if (mask2 != 0) {
+			ca.u.l2->cdp = 1;
+			ca.u.l2->u.s.data_mask = mask;
+			ca.u.l2->u.s.code_mask = mask2;
+		} else
+			ca.u.l2->u.ways_mask = mask;
 	} else {
-		if (mask2 != 0 && is_contiguous("L3", mask2) == 0)
-			return -EINVAL;
 		if (mask2 != 0) {
 			ca.u.l3->cdp = 1;
 			ca.u.l3->u.s.data_mask = mask;
@@ -307,6 +410,66 @@ rdt_ca_str_to_cbm(const char *param, struct rdt_ca ca)
 		} else
 			ca.u.l3->u.ways_mask = mask;
 	}
+
+	return 0;
+}
+
+/**
+ * @brief Parses rate string \a param and stores in \a mba
+ *
+ * @param [in] param rate string
+ * @param [out] mba to store result
+ *
+ * @return status
+ * @retval 0 on success
+ * @retval negative on error (-errno)
+ */
+static int
+rdt_mba_str_to_rate(const char *param, struct rdt_cfg mba)
+{
+	uint64_t rate;
+	int ret;
+
+	if (PQOS_CAP_TYPE_MBA != mba.type || NULL == mba.u.generic_ptr ||
+			NULL == param)
+		return -EINVAL;
+
+	ret = str_to_uint64(param, 10, &rate);
+	if (ret < 0 || rate == 0 || rate > 100)
+		return -EINVAL;
+
+	mba.u.mba->ctrl = 0;
+	mba.u.mba->mb_max = rate;
+
+	return 0;
+}
+
+/**
+ * @brief Parses mbps string \a param and stores in \a mba
+ *
+ * @param [in] param mbps string
+ * @param [out] mba to store result
+ *
+ * @return status
+ * @retval 0 on success
+ * @retval negative on error (-errno)
+ */
+static int
+rdt_mba_str_to_mbps(const char *param, struct rdt_cfg mba)
+{
+	uint64_t mbps;
+	int ret;
+
+	if (PQOS_CAP_TYPE_MBA != mba.type || NULL == mba.u.generic_ptr ||
+			NULL == param)
+		return -EINVAL;
+
+	ret = str_to_uint64(param, 10, &mbps);
+	if (ret < 0 || mbps == 0)
+		return -EINVAL;
+
+	mba.u.mba->ctrl = 1;
+	mba.u.mba->mb_max = mbps;
 
 	return 0;
 }
@@ -330,6 +493,8 @@ simplify_feature_str(const char *feature)
 		{"cpu", 'c'},
 		{"l2", '2'},
 		{"l3", '3'},
+		{"mba", 'm'},
+		{"mba_max", 'b'},
 		{NULL, 0}
 	};
 
@@ -358,22 +523,17 @@ parse_rdt(char *rdtstr)
 	char *rdtstr_saveptr = NULL;
 	char *group = NULL;
 	unsigned idx = g_cfg.config_count;
-	const struct rdt_ca l2ca = wrap_l2ca(&g_cfg.config[idx].l2);
-	const struct rdt_ca l3ca = wrap_l3ca(&g_cfg.config[idx].l3);
-	const unsigned min_len_arg = strlen("3=f;c=0");
+	const struct rdt_cfg l2ca = wrap_l2ca(&g_cfg.config[idx].l2);
+	const struct rdt_cfg l3ca = wrap_l3ca(&g_cfg.config[idx].l3);
+	const struct rdt_cfg mba = wrap_mba(&g_cfg.config[idx].mba);
 	const unsigned min_len_group = strlen("3=f");
 	int ret;
 
 	if (rdtstr == NULL)
 		return -EINVAL;
 
-	/* Min len check, 1 feature + 1 CPU e.g. "3=f;c=0" */
-	if (strlen(rdtstr) < min_len_arg) {
-		fprintf(stderr, "Invalid argument: \"%s\"\n", rdtstr);
-		return -EINVAL;
-	}
-
 	group = strtok_r(rdtstr, ";", &rdtstr_saveptr);
+
 	while (group != NULL) {
 		char *group_saveptr = NULL;
 
@@ -393,7 +553,7 @@ parse_rdt(char *rdtstr)
 
 		switch (simplify_feature_str(feature)) {
 		case '2':
-			if (rdt_ca_is_valid(l2ca))
+			if (rdt_cfg_is_valid(l2ca))
 				return -EINVAL;
 
 			ret = rdt_ca_str_to_cbm(param, l2ca);
@@ -402,7 +562,7 @@ parse_rdt(char *rdtstr)
 			break;
 
 		case '3':
-			if (rdt_ca_is_valid(l3ca))
+			if (rdt_cfg_is_valid(l3ca))
 				return -EINVAL;
 
 			ret = rdt_ca_str_to_cbm(param, l3ca);
@@ -423,16 +583,38 @@ parse_rdt(char *rdtstr)
 				return -EINVAL;
 			break;
 
+		case 'm':
+			if (rdt_cfg_is_valid(mba))
+				return -EINVAL;
+
+			ret = rdt_mba_str_to_rate(param, mba);
+			if (ret < 0)
+				return ret;
+			break;
+
+		case 'b':
+			if (rdt_cfg_is_valid(mba))
+				return -EINVAL;
+
+			ret = rdt_mba_str_to_mbps(param, mba);
+			if (ret < 0)
+				return ret;
+			break;
+
 		default:
 			fprintf(stderr, "Invalid option: \"%s\"\n", feature);
 			return -EINVAL;
-		}
+                }
 
 		group = strtok_r(NULL, ";", &rdtstr_saveptr);
 	}
 
-	if (CPU_COUNT(&g_cfg.config[idx].cpumask) == 0 ||
-            (!rdt_ca_is_valid(l2ca) && !rdt_ca_is_valid(l3ca)))
+	/* if no cpus specified then set pid flag */
+	if (CPU_COUNT(&g_cfg.config[idx].cpumask) == 0)
+		g_cfg.config[idx].pid_cfg = 1;
+
+	if (!(rdt_cfg_is_valid(l2ca) || rdt_cfg_is_valid(l3ca) ||
+			rdt_cfg_is_valid(mba)))
 		return -EINVAL;
 
 	g_cfg.config_count++;
@@ -469,8 +651,8 @@ check_cpus_overlapping(void)
                                                   &g_cfg.config[j].cpumask);
 #endif
 			if (1 == overlapping) {
-				fprintf(stderr, "CAT: Requested CPUs sets are "
-					"overlapping.\n");
+				fprintf(stderr, "Allocation: Requested CPUs "
+					"sets are overlapping.\n");
 				return -EINVAL;
 			}
 		}
@@ -503,15 +685,15 @@ check_cpus(void)
 
 			ret = pqos_cpu_check_core(m_cpu, cpu_id);
 			if (ret != PQOS_RETVAL_OK) {
-				fprintf(stderr, "CAT: %u is not a valid "
+				fprintf(stderr, "Allocation: %u is not a valid "
 					"logical core id.\n", cpu_id);
 				return -ENODEV;
 			}
 
 			ret = pqos_alloc_assoc_get(cpu_id, &cos_id);
 			if (ret != PQOS_RETVAL_OK) {
-				fprintf(stderr, "CAT: Failed to read cpu %u "
-					"COS association.\n", cpu_id);
+				fprintf(stderr, "Allocation: Failed to read "
+					"cpu %u COS association.\n", cpu_id);
 				return -EFAULT;
 			}
 
@@ -520,8 +702,9 @@ check_cpus(void)
 			 * then default one (#0)
 			 */
 			if (cos_id != 0) {
-				fprintf(stderr, "CAT: cpu %u has already "
-					"associated COS#%u. Please reset CAT."
+				fprintf(stderr, "Allocation: cpu %u has "
+					"already associated COS#%u. Please "
+					"reset allocation."
 					"\n", cpu_id, cos_id);
 				return -EBUSY;
 			}
@@ -532,34 +715,37 @@ check_cpus(void)
 }
 
 /**
- * @brief Checks if CPU supports requested CDP configuration
+ * @brief Checks if CPU supports requested L3 CDP configuration
  *
  * @return status
  * @retval 0 on success
  * @retval negative on error (-errno)
  */
 static int
-check_cdp_support(void)
+check_l3cdp_support(void)
 {
 	unsigned i = 0;
-	const int cdp_supported = m_cap_l3ca != NULL &&
-		m_cap_l3ca->u.l3ca->cdp == 1;
-	const int cdp_enabled = cdp_supported &&
-		m_cap_l3ca->u.l3ca->cdp_on == 1;
+	int ret;
+	int l3cdp_supported = 0;
+	int l3cdp_enabled = 0;
 
-	if (cdp_enabled)
+	ret = pqos_l3ca_cdp_enabled(m_cap, &l3cdp_supported, &l3cdp_enabled);
+	if (ret != PQOS_RETVAL_OK && ret != PQOS_RETVAL_RESOURCE)
+		return -1;
+
+	if (l3cdp_enabled)
 		return 0;
 
 	for (i = 0; i < g_cfg.config_count; i++) {
 		if (0 == g_cfg.config[i].l3.cdp)
 			continue;
 
-		if (!cdp_supported)
-			fprintf(stderr, "CAT: CDP requested but not supported."
-				"\n");
+		if (!l3cdp_supported)
+			fprintf(stderr, "Allocation: L3 CDP requested but not "
+				"supported.\n");
 		else
-			fprintf(stderr, "CAT: CDP requested but not enabled. "
-				"Please enable CDP.\n");
+			fprintf(stderr, "Allocation: L3 CDP requested but not "
+				"enabled. Please enable L3 CDP.\n");
 
 		return -ENOTSUP;
 	}
@@ -568,7 +754,90 @@ check_cdp_support(void)
 }
 
 /**
- * @brief Checks if CAT configuration requested by a user via cmd line
+ * @brief Checks if CPU supports requested L2 CDP configuration
+ *
+ * @return status
+ * @retval 0 on success
+ * @retval negative on error (-errno)
+ */
+static int
+check_l2cdp_support(void)
+{
+	unsigned i = 0;
+	int ret;
+
+	int l2cdp_supported = 0;
+	int l2cdp_enabled = 0;
+
+	ret = pqos_l2ca_cdp_enabled(m_cap, &l2cdp_supported, &l2cdp_enabled);
+	if (ret != PQOS_RETVAL_OK && ret != PQOS_RETVAL_RESOURCE)
+		return -1;
+
+	if (l2cdp_enabled)
+		return 0;
+
+	for (i = 0; i < g_cfg.config_count; i++) {
+		if (0 == g_cfg.config[i].l2.cdp)
+			continue;
+
+		if (!l2cdp_supported)
+			fprintf(stderr, "Allocation: L2 CDP requested but not "
+				"supported.\n");
+		else
+			fprintf(stderr, "Allocation: L2 CDP requested but not "
+				"enabled. Please enable L2 CDP.\n");
+
+		return -ENOTSUP;
+	}
+
+	return 0;
+}
+
+/**
+ * @brief Checks if CPU supports requested MBA CTRL configuration
+ *
+ * @return status
+ * @retval 0 on success
+ * @retval negative on error (-errno)
+ */
+static int
+check_mba_ctrl_support(void)
+{
+	unsigned i = 0;
+	int ret;
+	int ctrl_supported = 0;
+	int ctrl_enabled = 0;
+
+	/* MBA Software controller is available */
+	if (g_cfg.interface == PQOS_INTER_MSR)
+		return 0;
+
+	ret = pqos_mba_ctrl_enabled(m_cap, &ctrl_supported, &ctrl_enabled);
+	if (ret != PQOS_RETVAL_OK && ret != PQOS_RETVAL_RESOURCE)
+		return -1;
+
+	if (ctrl_enabled != 0)
+		return 0;
+
+	for (i = 0; i < g_cfg.config_count; i++) {
+		if (0 == g_cfg.config[i].mba.ctrl)
+			continue;
+
+		if (ctrl_supported == 0)
+			fprintf(stderr, "Allocation: MBA CTRL requested but "
+			        "not supported.\n");
+		else
+			fprintf(stderr, "Allocation: MBA CTRL requested but "
+				"not enabled. Please enable MBA CTRL.\n");
+
+		return -ENOTSUP;
+	}
+
+	return 0;
+}
+
+/**
+ * @brief Checks if CAT/MBA configuration requested by a user via cmd line
  *        is supported by the system.
  *
  * @return status
@@ -581,17 +850,24 @@ check_supported(void)
 	unsigned i = 0;
 
 	for (i = 0; i < g_cfg.config_count; i++) {
-		if (rdt_ca_is_valid(wrap_l3ca(&g_cfg.config[i].l3)) &&
+		if (rdt_cfg_is_valid(wrap_l3ca(&g_cfg.config[i].l3)) &&
                     NULL == m_cap_l3ca) {
-			fprintf(stderr, "CAT: L3CA requested but not supported "
-				"by system!\n");
+			fprintf(stderr, "Allocation: L3CA requested but not "
+				"supported by system!\n");
 			return -ENOTSUP;
 		}
 
-		if (rdt_ca_is_valid(wrap_l2ca(&g_cfg.config[i].l2)) &&
+		if (rdt_cfg_is_valid(wrap_l2ca(&g_cfg.config[i].l2)) &&
                     NULL == m_cap_l2ca) {
-			fprintf(stderr, "CAT: L2CA requested but not supported "
-				"by system!\n");
+			fprintf(stderr, "Allocation: L2CA requested but not "
+				"supported by system!\n");
+			return -ENOTSUP;
+		}
+
+		if (rdt_cfg_is_valid(wrap_mba(&g_cfg.config[i].mba)) &&
+                    NULL == m_cap_mba) {
+			fprintf(stderr, "Allocation: MBA requested but not "
+				"supported by system!\n");
 			return -ENOTSUP;
 		}
 	}
@@ -641,8 +917,8 @@ get_contention_mask(const enum pqos_cap_type type)
 /**
  * @brief Returns cumulative mask for \a ca CAT config
  *
- * For L3 CDP config returns code_mask | data_mask,
- * for L2 or L3 non-CDP config returns ways_mask
+ * For L2/L3 CDP config returns code_mask | data_mask,
+ * for L2/L3 non-CDP config returns ways_mask
  *
  * @param [in] ca CAT COS configuration
  *
@@ -650,14 +926,19 @@ get_contention_mask(const enum pqos_cap_type type)
  * @retval UINT64_MAX on error
  */
 static uint64_t
-rdt_ca_get_cumulative_cbm(const struct rdt_ca ca)
+rdt_ca_get_cumulative_cbm(const struct rdt_cfg ca)
 {
 	if (!(PQOS_CAP_TYPE_L2CA == ca.type || PQOS_CAP_TYPE_L3CA == ca.type) ||
-            NULL == ca.u.generic_ptr || 0 == rdt_ca_is_valid(ca))
+            NULL == ca.u.generic_ptr || 0 == rdt_cfg_is_valid(ca))
 		return UINT64_MAX;
 
-	if (PQOS_CAP_TYPE_L2CA == ca.type)
-		return ca.u.l2->ways_mask;
+	if (PQOS_CAP_TYPE_L2CA == ca.type) {
+		if (ca.u.l2->cdp == 1)
+			return ca.u.l2->u.s.code_mask | ca.u.l2->u.s.data_mask;
+		else
+			return ca.u.l2->u.ways_mask;
+	}
+
 	if (ca.u.l3->cdp == 1)
 		return ca.u.l3->u.s.code_mask | ca.u.l3->u.s.data_mask;
 
@@ -679,7 +960,7 @@ static int
 check_cbm_len_and_contention(const enum pqos_cap_type type)
 {
 	unsigned i = 0;
-	struct rdt_ca ca;
+	struct rdt_cfg ca;
 	uint64_t mask = 0;
 
 	if (!(PQOS_CAP_TYPE_L2CA == type || PQOS_CAP_TYPE_L3CA == type))
@@ -697,7 +978,7 @@ check_cbm_len_and_contention(const enum pqos_cap_type type)
 		else
 			ca = wrap_l3ca(&g_cfg.config[i].l3);
 
-		if (!rdt_ca_is_valid(ca))
+		if (!rdt_cfg_is_valid(ca))
 			continue;
 
 		mask = rdt_ca_get_cumulative_cbm(ca);
@@ -706,8 +987,8 @@ check_cbm_len_and_contention(const enum pqos_cap_type type)
 
 		if ((mask & not_cbm) != 0) {
 			fprintf(stderr, "CAT: One or more of requested %s CBMs "
-				"(", rdt_ca_get_type_str(ca));
-			rdt_ca_print(stderr, ca);
+				"(", rdt_cfg_get_type_str(ca));
+			rdt_cfg_print(stderr, ca);
 			fprintf(stderr, ") not supported by system "
 				"(too long).\n");
 			return -ENOTSUP;
@@ -716,8 +997,8 @@ check_cbm_len_and_contention(const enum pqos_cap_type type)
 		/* Just a note */
 		if ((mask & contention_cbm) != 0) {
 			printf("CAT: One or more of requested %s CBMs "
-                               "(", rdt_ca_get_type_str(ca));
-			rdt_ca_print(stdout, ca);
+                               "(", rdt_cfg_get_type_str(ca));
+			rdt_cfg_print(stdout, ca);
 			printf(") overlap contention mask.\n");
 		}
 	}
@@ -756,14 +1037,14 @@ check_cbm_len_and_contention_all(void)
 
 
 /**
- * @brief Validates requested CAT configuration
+ * @brief Validates requested CAT/MBA configuration
  *
  * @return status
  * @retval 0 on success
  * @retval negative on error (-errno)
  */
 static int
-cat_validate(void)
+alloc_validate(void)
 {
 	int ret = 0;
 
@@ -775,7 +1056,15 @@ cat_validate(void)
 	if (ret != 0)
 		return ret;
 
-	ret = check_cdp_support();
+	ret = check_l3cdp_support();
+	if (ret != 0)
+		return ret;
+
+	ret = check_l2cdp_support();
+	if (ret != 0)
+		return ret;
+
+	ret = check_mba_ctrl_support();
 	if (ret != 0)
 		return ret;
 
@@ -892,6 +1181,10 @@ alloc_release(const cpu_set_t *cores)
 	if (m_cpu == NULL)
 		return -EFAULT;
 
+        /* if no cores in set then return success */
+        if (CPU_COUNT(cores) == 0)
+                return 0;
+
 	for (i = 0, core_num = 0; i < m_cpu->num_cores; i++) {
 		if (0 == CPU_ISSET(m_cpu->cores[i].lcore, cores))
 			continue;
@@ -900,9 +1193,10 @@ alloc_release(const cpu_set_t *cores)
 	}
 
 	ret = pqos_alloc_release(core_array, core_num);
-	if (ret != PQOS_RETVAL_OK)
-		return -EFAULT;
-
+	if (ret != PQOS_RETVAL_OK) {
+                fprintf(stderr, "Failed to release COS!\n");
+                return -EFAULT;
+        }
 	return 0;
 }
 
@@ -911,24 +1205,34 @@ alloc_release(const cpu_set_t *cores)
  *
  * @param [out] l2_def L2 COS
  * @param [out] l3_def L3 COS
+ * @param [out] mba_def MBA COS
  *
  * @return status
  * @retval 0 on success
  * @retval negative on error (-errno)
  */
 static int
-cat_get_default_cos(struct pqos_l2ca *l2_def, struct pqos_l3ca *l3_def)
+alloc_get_default_cos(struct pqos_l2ca *l2_def, struct pqos_l3ca *l3_def,
+                    struct pqos_mba *mba_def)
 {
-	if (l2_def == NULL && l3_def == NULL)
+	if (l2_def == NULL && l3_def == NULL && mba_def == NULL)
 		return -EINVAL;
 
-	if (m_cap_l2ca == NULL && m_cap_l3ca == NULL)
+	if (m_cap_l2ca == NULL && m_cap_l3ca == NULL && m_cap_mba == NULL)
 		return -EFAULT;
 
 	if (m_cap_l2ca != NULL && l2_def != NULL) {
-		memset(l2_def, 0, sizeof(*l2_def));
-		l2_def->ways_mask =
+		const uint64_t def_mask =
 			(1ULL << m_cap_l2ca->u.l2ca->num_ways) - 1ULL;
+
+		memset(l2_def, 0, sizeof(*l2_def));
+
+		if (m_cap_l2ca->u.l2ca->cdp_on == 1) {
+			l2_def->cdp = 1;
+			l2_def->u.s.code_mask = def_mask;
+			l2_def->u.s.data_mask = def_mask;
+		} else
+			l2_def->u.ways_mask = def_mask;
 	}
 
 	if (m_cap_l3ca != NULL  && l3_def != NULL) {
@@ -945,15 +1249,25 @@ cat_get_default_cos(struct pqos_l2ca *l2_def, struct pqos_l3ca *l3_def)
 			l3_def->u.ways_mask = def_mask;
 	}
 
+	if (m_cap_mba != NULL && mba_def != NULL) {
+		memset(mba_def, 0, sizeof(*mba_def));
+		if (m_cap_mba->u.mba->ctrl_on == 1) {
+			mba_def->ctrl = 1;
+			mba_def->mb_max = UINT32_MAX;
+		} else
+			mba_def->mb_max = 100;
+	}
+
 	return 0;
 }
 
 /**
- * @brief Configures COS \a cos_id defined by \a l2ca and \a l3ca on
+ * @brief Configures COS \a cos_id defined by \a l2ca, \a l3ca and \a mba on
  *        \a socket_id
  *
  * @param [in] l2ca L2 classes configuration
  * @param [in] l3ca L3 classes configuration
+ * @param [in] mba MBA configuration
  * @param [in] core_id core belonging to a socket/L2 cluster to configure COS on
  * @param [in] cos_id id of COS to be configured
  *
@@ -962,18 +1276,19 @@ cat_get_default_cos(struct pqos_l2ca *l2_def, struct pqos_l3ca *l3_def)
  * @retval negative on error (-errno)
  */
 static int
-cat_configure_cos(const struct pqos_l2ca *l2ca, const struct pqos_l3ca *l3ca,
-                  const unsigned core_id, const unsigned cos_id)
+cfg_configure_cos(const struct pqos_l2ca *l2ca, const struct pqos_l3ca *l3ca,
+    const struct pqos_mba *mba, const unsigned core_id, const unsigned cos_id)
 {
 	struct pqos_l2ca l2_defs;
 	struct pqos_l3ca l3_defs;
-        const struct pqos_coreinfo *ci = NULL;
+	struct pqos_mba mba_defs;
+	const struct pqos_coreinfo *ci = NULL;
 	int ret;
 
-	if (NULL == l2ca || NULL == l3ca)
+	if (NULL == l2ca || NULL == l3ca || NULL == mba)
 		return -EINVAL;
 
-	if (NULL == m_cap_l2ca && NULL == m_cap_l3ca)
+	if (NULL == m_cap_l2ca && NULL == m_cap_l3ca && NULL == m_cap_mba)
 		return -EFAULT;
 
 
@@ -985,17 +1300,17 @@ cat_configure_cos(const struct pqos_l2ca *l2ca, const struct pqos_l3ca *l3ca,
         }
 
         /* Get default COS values */
-	ret = cat_get_default_cos(&l2_defs, &l3_defs);
+	ret = alloc_get_default_cos(&l2_defs, &l3_defs, &mba_defs);
 	if (ret != 0)
 		return ret;
 
 	/* Configure COS */
 	if (m_cap_l3ca != NULL && m_cap_l3ca->u.l3ca->num_classes > cos_id) {
-                const unsigned socket_id = ci->socket;
+		const unsigned socket_id = ci->socket;
 		struct pqos_l3ca ca = *l3ca;
 
 		/* if COS is not configured, set it to default */
-		if (!rdt_ca_is_valid(wrap_l3ca(&ca)))
+		if (!rdt_cfg_is_valid(wrap_l3ca(&ca)))
 			ca = l3_defs;
 
 		/* set proper COS id */
@@ -1004,18 +1319,18 @@ cat_configure_cos(const struct pqos_l2ca *l2ca, const struct pqos_l3ca *l3ca,
 		ret = pqos_l3ca_set(socket_id, 1, &ca);
 		if (ret != PQOS_RETVAL_OK) {
 			fprintf(stderr,
-                                "Error setting L3 CAT COS#%u on socket %u!\n",
-                                cos_id, socket_id);
+				"Error setting L3 CAT COS#%u on socket %u!\n",
+				cos_id, socket_id);
 			return -EFAULT;
 		}
 	}
 
 	if (m_cap_l2ca != NULL  && m_cap_l2ca->u.l2ca->num_classes > cos_id) {
-                const unsigned l2_id = ci->l2_id;
+		const unsigned l2_id = ci->l2_id;
 		struct pqos_l2ca ca = *l2ca;
 
 		/* if COS is not configured, set it to default */
-		if (!rdt_ca_is_valid(wrap_l2ca(&ca)))
+		if (!rdt_cfg_is_valid(wrap_l2ca(&ca)))
 			ca = l2_defs;
 
 		/* set proper COS id */
@@ -1023,8 +1338,33 @@ cat_configure_cos(const struct pqos_l2ca *l2ca, const struct pqos_l3ca *l3ca,
 
 		if (pqos_l2ca_set(l2_id, 1, &ca) != PQOS_RETVAL_OK) {
 			fprintf(stderr,
-                                "Error setting L2 CAT COS#%u on L2ID %u!\n",
-                                cos_id, l2_id);
+				"Error setting L2 CAT COS#%u on L2ID %u!\n",
+				cos_id, l2_id);
+			return -EFAULT;
+		}
+	}
+
+	if (m_cap_mba != NULL && m_cap_mba->u.mba->num_classes > cos_id) {
+		const unsigned socket_id = ci->socket;
+		struct pqos_mba mba_requested = *mba;
+		struct pqos_mba mba_actual;
+
+		/* if COS is not configured, set it to default */
+		if (!rdt_cfg_is_valid(wrap_mba(&mba_requested)))
+			mba_requested = mba_defs;
+		else if (mba_sc_mode()) {
+			mba_requested.mb_max = MBA_SC_DEF_INIT_MBA;
+			mba_requested.ctrl = 0;
+		}
+
+		/* set proper COS id */
+		mba_requested.class_id = cos_id;
+
+		ret = pqos_mba_set(socket_id, 1, &mba_requested, &mba_actual);
+		if (ret != PQOS_RETVAL_OK) {
+			fprintf(stderr,
+				"Error setting MBA COS#%u on socket %u!\n",
+				cos_id, socket_id);
 			return -EFAULT;
 		}
 	}
@@ -1033,55 +1373,71 @@ cat_configure_cos(const struct pqos_l2ca *l2ca, const struct pqos_l3ca *l3ca,
 }
 
 /**
- * @brief Sets L3 configuration.
+ * @brief Sets socket/cluster definitions for selected cores (OS interface)
+ *        Note: Assigns COS on a system wide basis
  *
  * @param [in] technology configured RDT allocation technologies
- *             (programmed on socket basis)
  * @param [in] cores cores configuration table
  * @param [in] l2ca L2 CAT configuration table
  * @param [in] l3ca L3 CAT configuration table
+ * @param [in] mba MBA configuration table
  *
  * @return Operation status
  * @retval 0 on success
  * @retval negative on error (-errno)
  */
 static int
-cat_set_l3(const unsigned technology, const cpu_set_t *cores,
-           const struct pqos_l2ca *pl2ca, const struct pqos_l3ca *pl3ca)
+cfg_set_cores_os(const unsigned technology, const cpu_set_t *cores,
+                 const struct pqos_l2ca *l2ca, const struct pqos_l3ca *l3ca,
+                 const struct pqos_mba *mba)
 {
 	int ret;
-        unsigned j;
+        unsigned i, max_id, core_num, cos_id;
+        unsigned core_array[CPU_SETSIZE] = {0};
 
-        for (j = 0; j < RDT_MAX_SOCKETS; j++) {
-                unsigned core_array[CPU_SETSIZE] = {0};
-                unsigned core_num, cos_id;
+        /* Convert cpu set to core array */
+        for (i = 0, core_num = 0; i < m_cpu->num_cores; i++) {
+		if (0 == CPU_ISSET(m_cpu->cores[i].lcore, cores))
+			continue;
+		core_array[core_num++] = m_cpu->cores[i].lcore;
+	}
+        if (core_num == 0)
+                return -EFAULT;
 
-                /* Get cores on socket j */
-                ret = get_socket_cores(cores, j, &core_num, core_array);
+        /* Assign all cores to single COS */
+        ret = pqos_alloc_assign(technology, core_array, core_num, &cos_id);
+        switch (ret) {
+        case PQOS_RETVAL_OK:
+                break;
+        case PQOS_RETVAL_RESOURCE:
+                fprintf(stderr, "No free COS available!\n");
+                return -EBUSY;
+        default:
+                fprintf(stderr, "Unable to assign COS!\n");
+                return -EFAULT;
+        }
+
+        max_id = get_max_res_id(technology);
+        if (!max_id)
+                return -EFAULT;
+
+        /* Set COS definition on necessary sockets/clusters */
+        for (i = 0; i < max_id; i++) {
+                memset(core_array, 0, sizeof(core_array));
+
+                /* Get cores on res id i */
+                if (technology & (1 << PQOS_CAP_TYPE_L2CA))
+                        ret = get_l2id_cores(cores, i, &core_num, core_array);
+                else
+                        ret = get_socket_cores(cores, i, &core_num, core_array);
                 if (ret != 0)
                         return ret;
 
                 if (core_num == 0)
                         continue;
 
-                /* Assign COS to those cores */
-                ret = pqos_alloc_assign(technology, core_array, core_num,
-                                        &cos_id);
-                switch (ret) {
-                case PQOS_RETVAL_OK:
-                        break;
-                case PQOS_RETVAL_RESOURCE:
-                        fprintf(stderr,
-                                "No free COS available on socket %u.\n", j);
-                        return -EBUSY;
-                default:
-                        fprintf(stderr,
-                                "Unable to assign COS on socket %u!\n", j);
-                        return -EFAULT;
-                }
-
-                /* Configure COS on socket j */
-                ret = cat_configure_cos(pl2ca, pl3ca, core_array[0], cos_id);
+                /* Configure COS on res ID i */
+                ret = cfg_configure_cos(l2ca, l3ca, mba, core_array[0], cos_id);
                 if (ret != 0)
                         return ret;
         }
@@ -1090,31 +1446,41 @@ cat_set_l3(const unsigned technology, const cpu_set_t *cores,
 }
 
 /**
- * @brief Sets L2 configuration (and L3 if available).
+ * @brief Sets socket/cluster definitions for selected cores (MSR interface)
+ *        Note: Assigns COS on a res ID basis
  *
  * @param [in] technology configured RDT allocation technologies
- *             (programmed on L2 ID basis)
  * @param [in] cores cores configuration table
  * @param [in] l2ca L2 CAT configuration table
  * @param [in] l3ca L3 CAT configuration table
+ * @param [in] mba MBA configuration table
  *
  * @return Operation status
  * @retval 0 on success
  * @retval negative on error (-errno)
  */
 static int
-cat_set_l2(const unsigned technology, const cpu_set_t *cores,
-           const struct pqos_l2ca *pl2ca, const struct pqos_l3ca *pl3ca)
+cfg_set_cores_msr(const unsigned technology, const cpu_set_t *cores,
+                  const struct pqos_l2ca *l2ca, const struct pqos_l3ca *l3ca,
+                  const struct pqos_mba *mba)
 {
 	int ret;
-        unsigned j;
+        unsigned i, max_id;
 
-        for (j = 0; j < RDT_MAX_L2IDS; j++) {
+        max_id = get_max_res_id(technology);
+        if (!max_id)
+                return -EFAULT;
+
+        /* Assign new COS for all applicable res ids */
+        for (i = 0; i < max_id; i++) {
                 unsigned core_array[CPU_SETSIZE] = {0};
                 unsigned core_num, cos_id;
 
-                /* Get cores on L2 id j */
-                ret = get_l2id_cores(cores, j, &core_num, core_array);
+                /* Get cores on res id i */
+                if (technology & (1 << PQOS_CAP_TYPE_L2CA))
+                        ret = get_l2id_cores(cores, i, &core_num, core_array);
+                else
+                        ret = get_socket_cores(cores, i, &core_num, core_array);
                 if (ret != 0)
                         return ret;
 
@@ -1128,17 +1494,15 @@ cat_set_l2(const unsigned technology, const cpu_set_t *cores,
                 case PQOS_RETVAL_OK:
                         break;
                 case PQOS_RETVAL_RESOURCE:
-                        fprintf(stderr,
-                                "No free COS available on L2ID %u.\n", j);
+                        fprintf(stderr, "No free COS available!\n");
                         return -EBUSY;
                 default:
-                        fprintf(stderr,
-                                "Unable to assign COS on L2ID %u!\n", j);
+                        fprintf(stderr, "Unable to assign COS!\n");
                         return -EFAULT;
                 }
 
-                /* Configure COS on L2ID j */
-                ret = cat_configure_cos(pl2ca, pl3ca, core_array[0], cos_id);
+                /* Configure COS on res ID i */
+                ret = cfg_configure_cos(l2ca, l3ca, mba, core_array[0], cos_id);
                 if (ret != 0)
                         return ret;
         }
@@ -1146,52 +1510,137 @@ cat_set_l2(const unsigned technology, const cpu_set_t *cores,
         return 0;
 }
 
+/**
+ * @brief Sets socket/cluster definitions for selected PIDs
+ *
+ * @param [in] technology configured RDT allocation technologies
+ * @param [in] l2ca L2 CAT configuration table
+ * @param [in] l3ca L3 CAT configuration table
+ * @param [in] mba MBA configuration table
+ *
+ * @return Operation status
+ * @retval 0 on success
+ * @retval negative on error (-errno)
+ */
+static int
+cfg_set_pids(const unsigned technology, const struct pqos_l3ca *l3ca,
+             const struct pqos_l2ca *l2ca, const struct pqos_mba *mba)
+{
+        int ret = 0;
+	unsigned i, cos_id, max_id, num_pids = 1;
+        pid_t pid = getpid(), *p = &pid;
+
+        /* Assign COS to selected pids otherwise assign to this pid */
+        if (g_cfg.pid_count) {
+                p = g_cfg.pids;
+                num_pids = g_cfg.pid_count;
+        }
+
+        ret = pqos_alloc_assign_pid(technology, p, num_pids, &cos_id);
+        switch (ret) {
+        case PQOS_RETVAL_OK:
+                break;
+        case PQOS_RETVAL_RESOURCE:
+                fprintf(stderr, "No free COS available!.\n");
+                ret = -EBUSY;
+                goto set_pids_exit;
+        default:
+                fprintf(stderr, "Unable to assign task to COS!\n");
+                ret = -EFAULT;
+                goto set_pids_exit;
+        }
+
+        max_id = get_max_res_id(technology);
+        if (!max_id)
+                return -EFAULT;
+
+        /* Set COS definitions across all res IDs */
+        for (i = 0; i < max_id; i++) {
+                unsigned core;
+
+                /* Get cores on res ID i */
+                if (technology & (1 << PQOS_CAP_TYPE_L2CA))
+                        ret = pqos_cpu_get_one_by_l2id(m_cpu, i, &core);
+                else
+                        ret = pqos_cpu_get_one_core(m_cpu, i, &core);
+                if (ret != 0)
+                        break;
+
+                /* Configure COS on res ID i */
+                ret = cfg_configure_cos(l2ca, l3ca, mba, core, cos_id);
+                if (ret != 0)
+                        break;
+        }
+set_pids_exit:
+        if (ret != 0)
+                (void) pqos_alloc_release_pid(p, num_pids);
+
+        return ret;
+}
+
 int
-cat_configure(void)
+alloc_configure(void)
 {
 	struct pqos_l3ca l3ca[g_cfg.config_count];
 	struct pqos_l2ca l2ca[g_cfg.config_count];
-	cpu_set_t cpu[g_cfg.config_count];
+	struct pqos_mba mba[g_cfg.config_count];
+        cpu_set_t cpu[g_cfg.config_count];
+        int pid_cfg[g_cfg.config_count];
 	unsigned i = 0;
 	int ret = 0;
 
+        memset(pid_cfg, 0, g_cfg.config_count * sizeof(pid_cfg[0]));
+
 	/* Validate cmd line configuration */
-	ret = cat_validate();
+	ret = alloc_validate();
 	if (ret != 0) {
-		fprintf(stderr,
-                        "CAT: Requested CAT configuration is not valid!\n");
+		fprintf(stderr, "Requested configuration is not valid!\n");
 		return ret;
 	}
 
 	for (i = 0; i < g_cfg.config_count; i++) {
 		l3ca[i] = g_cfg.config[i].l3;
 		l2ca[i] = g_cfg.config[i].l2;
-		cpu[i] = g_cfg.config[i].cpumask;
-	}
+		mba[i] = g_cfg.config[i].mba;
+                cpu[i] = g_cfg.config[i].cpumask;
+                pid_cfg[i] = g_cfg.config[i].pid_cfg;
+        }
 
 	for (i = 0; i < g_cfg.config_count; i++) {
-		unsigned technology = 0;
+                unsigned technology = 0;
 
-		if (rdt_ca_is_valid(wrap_l2ca(&l2ca[i])))
+		if (rdt_cfg_is_valid(wrap_l2ca(&l2ca[i])))
 			technology |= (1 << PQOS_CAP_TYPE_L2CA);
 
-		if (rdt_ca_is_valid(wrap_l3ca(&l3ca[i])))
+		if (rdt_cfg_is_valid(wrap_l3ca(&l3ca[i])))
 			technology |= (1 << PQOS_CAP_TYPE_L3CA);
 
-                if (!(technology & (1 << PQOS_CAP_TYPE_L2CA)))
-                        ret = cat_set_l3(technology, &cpu[i], &l2ca[i],
-                                         &l3ca[i]);
+		if (rdt_cfg_is_valid(wrap_mba(&mba[i])))
+			technology |= (1 << PQOS_CAP_TYPE_MBA);
+
+                /* If pid config selected then assign tasks otherwise cores */
+                if (pid_cfg[i])
+                        ret = cfg_set_pids(technology, &l3ca[i], &l2ca[i],
+                                           &mba[i]);
                 else
-                        ret = cat_set_l2(technology, &cpu[i], &l2ca[i],
-                                         &l3ca[i]);
+                        if (g_cfg.interface == PQOS_INTER_MSR)
+                                ret = cfg_set_cores_msr(technology, &cpu[i],
+                                                        &l2ca[i], &l3ca[i],
+                                                        &mba[i]);
+                        else
+                                ret = cfg_set_cores_os(technology, &cpu[i],
+                                                       &l2ca[i], &l3ca[i],
+                                                       &mba[i]);
 
+                /* If assign fails then free already assigned cpus */
                 if (ret != 0) {
-                        int j = (int) i;
-
-                        fprintf(stderr, "CAT: Failed to configure CAT!\n");
-                        printf("Reverting CAT configuration...\n");
-                        for (; j >= 0; j--)
-                                (void) alloc_release(&cpu[j]);
+                        fprintf(stderr, "Allocation failed!\n");
+                        printf("Reverting configuration of allocation...\n");
+                        for (; (int)i >= 0; i--) {
+                                if (pid_cfg[i])
+                                        continue;
+                                (void)alloc_release(&cpu[i]);
+                        }
                         return ret;
                 }
         }
@@ -1200,7 +1649,7 @@ cat_configure(void)
 }
 
 int
-cat_reset(void)
+alloc_reset(void)
 {
 	unsigned i = 0;
 	int ret = 0;
@@ -1222,7 +1671,7 @@ cat_reset(void)
 }
 
 void
-cat_fini(void)
+alloc_fini(void)
 {
 	int ret = 0;
 
@@ -1242,7 +1691,7 @@ cat_fini(void)
 }
 
 void
-cat_exit(void)
+alloc_exit(void)
 {
 	unsigned i = 0;
 
@@ -1253,51 +1702,40 @@ cat_exit(void)
 	if (g_cfg.verbose)
 		printf("CAT: Reverting CAT configuration...\n");
 
-	for (i = 0; i < g_cfg.config_count; i++)
-		if (alloc_release(&g_cfg.config[i].cpumask) != 0)
-			fprintf(stderr, "Failed to release COS!\n");
-
-	cat_fini();
-}
-
-/**
- * @brief Signal handler to do clean-up on exit on signal
- *
- * @param [in] signum signal
- */
-static void
-signal_handler(int signum)
-{
-	if (signum == SIGINT || signum == SIGTERM) {
-		printf("\nRDTSET: Signal %d received, preparing to exit...\n",
-                       signum);
-
-		cat_exit();
-
-		/* exit with the expected status */
-		signal(signum, SIG_DFL);
-		kill(getpid(), signum);
-	}
+        /* release resources */
+	for (i = 0; i < g_cfg.config_count; i++) {
+                /* release pids if selected */
+                if (g_cfg.config[i].pid_cfg && g_cfg.pid_count != 0) {
+                        if (pqos_alloc_release_pid(g_cfg.pids, g_cfg.pid_count))
+                                fprintf(stderr, "Failed to release PID COS!\n");
+                        continue;
+                }
+                /* release cores */
+                if (alloc_release(&g_cfg.config[i].cpumask) != 0)
+                        fprintf(stderr, "Failed to release cores COS!\n");
+        }
 }
 
 int
-cat_init(void)
+alloc_init(void)
 {
 	int ret = 0;
 	struct pqos_config cfg;
 
 	if (m_cap != NULL || m_cpu != NULL) {
-		fprintf(stderr, "CAT: CAT module already initialized!\n");
+		fprintf(stderr, "Allocation: module already initialized!\n");
 		return -EEXIST;
 	}
 
-	/* PQoS Initialization - Check and initialize CAT capability */
+	/* PQoS Initialization - Check and initialize allocation capabilities */
 	memset(&cfg, 0, sizeof(cfg));
 	cfg.fd_log = STDOUT_FILENO;
-	cfg.verbose = 0;
+	cfg.verbose = g_cfg.verbose;
+	cfg.interface = g_cfg.interface;
 	ret = pqos_init(&cfg);
 	if (ret != PQOS_RETVAL_OK) {
-		fprintf(stderr, "CAT: Error initializing PQoS library!\n");
+		fprintf(stderr, "Allocation: Error initializing PQoS "
+			"library!\n");
 		ret = -EFAULT;
 		goto err;
 	}
@@ -1305,7 +1743,8 @@ cat_init(void)
 	/* Get capability and CPU info pointer */
 	ret = pqos_cap_get(&m_cap, &m_cpu);
 	if (ret != PQOS_RETVAL_OK || m_cap == NULL || m_cpu == NULL) {
-		fprintf(stderr, "CAT: Error retrieving PQoS capabilities!\n");
+		fprintf(stderr, "Allocation: Error retrieving PQoS "
+			"capabilities!\n");
 		ret = -EFAULT;
 		goto err;
 	}
@@ -1313,27 +1752,22 @@ cat_init(void)
 	/* Get L2CA capabilities */
 	ret = pqos_cap_get_type(m_cap, PQOS_CAP_TYPE_L2CA, &m_cap_l2ca);
 	if (g_cfg.verbose && (ret != PQOS_RETVAL_OK || m_cap_l2ca == NULL))
-		printf("CAT: L2 CAT capability not supported.\n");
+		printf("Allocation: L2 CAT capability not supported.\n");
 
 	/* Get L3CA capabilities */
 	ret = pqos_cap_get_type(m_cap, PQOS_CAP_TYPE_L3CA, &m_cap_l3ca);
 	if (g_cfg.verbose && (ret != PQOS_RETVAL_OK || m_cap_l3ca == NULL))
-		printf("CAT: L3 CAT capability not supported.\n");
+		printf("Allocation: L3 CAT capability not supported.\n");
 
-	if (m_cap_l3ca == NULL && m_cap_l2ca == NULL) {
-		fprintf(stderr, "CAT: L2 CAT, L3 CAT "
-			"capabilities not supported!\n");
+	/* Get MBA capabilities */
+	ret = pqos_cap_get_type(m_cap, PQOS_CAP_TYPE_MBA, &m_cap_mba);
+	if (g_cfg.verbose && (ret != PQOS_RETVAL_OK || m_cap_mba == NULL))
+		printf("Allocation: MBA capability not supported.\n");
+
+
+	if (m_cap_l3ca == NULL && m_cap_l2ca == NULL && m_cap_mba == NULL) {
+		fprintf(stderr, "Allocation capabilities not supported!\n");
 		ret = -EFAULT;
-		goto err;
-	}
-
-	signal(SIGINT, signal_handler);
-	signal(SIGTERM, signal_handler);
-
-	ret = atexit(cat_exit);
-	if (ret != 0) {
-		ret = -EFAULT;
-		fprintf(stderr, "CAT: Cannot set exit function\n");
 		goto err;
 	}
 
@@ -1341,7 +1775,7 @@ cat_init(void)
 
  err:
 	/* deallocate all the resources */
-	cat_fini();
+	alloc_fini();
 	return ret;
 }
 
@@ -1353,11 +1787,11 @@ print_cmd_line_rdt_config(void)
 
 	if (CPU_COUNT(&g_cfg.reset_cpuset) != 0) {
 		cpuset_to_str(cpustr, sizeof(cpustr), &g_cfg.reset_cpuset);
-		printf("CAT Reset: CPUs: %s\n", cpustr);
+		printf("Allocation Reset: CPUs: %s\n", cpustr);
 	}
 
 	for (i = 0; i < g_cfg.config_count; i++) {
-		struct rdt_ca ca_array[2];
+		struct rdt_cfg cfg_array[3];
 		unsigned j;
 
 		if (CPU_COUNT(&g_cfg.config[i].cpumask) == 0)
@@ -1365,15 +1799,16 @@ print_cmd_line_rdt_config(void)
 
 		cpuset_to_str(cpustr, sizeof(cpustr), &g_cfg.config[i].cpumask);
 
-		ca_array[0] = wrap_l2ca(&g_cfg.config[i].l2);
-		ca_array[1] = wrap_l3ca(&g_cfg.config[i].l3);
+		cfg_array[0] = wrap_l2ca(&g_cfg.config[i].l2);
+		cfg_array[1] = wrap_l3ca(&g_cfg.config[i].l3);
+		cfg_array[2] = wrap_mba(&g_cfg.config[i].mba);
 
-		for (j = 0; j < DIM(ca_array); j++) {
-			if (!rdt_ca_is_valid(ca_array[j]))
+		for (j = 0; j < DIM(cfg_array); j++) {
+			if (!rdt_cfg_is_valid(cfg_array[j]))
 				continue;
 			printf("%s Allocation: CPUs: %s ",
-                               rdt_ca_get_type_str(ca_array[j]), cpustr);
-			rdt_ca_print(stdout, ca_array[j]);
+                               rdt_cfg_get_type_str(cfg_array[j]), cpustr);
+			rdt_cfg_print(stdout, cfg_array[j]);
 			printf("\n");
 		}
 	}

@@ -1,7 +1,7 @@
 /*
  * BSD LICENSE
  *
- * Copyright(c) 2014-2016 Intel Corporation. All rights reserved.
+ * Copyright(c) 2014-2019 Intel Corporation. All rights reserved.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -44,9 +44,9 @@
 #include <dirent.h>
 
 #include "pqos.h"
-#include "pidapi.h"
 #include "cap.h"
 #include "monitoring.h"
+#include "os_monitoring.h"
 
 #include "machine.h"
 #include "types.h"
@@ -128,13 +128,6 @@
 #define MBM_MAX_VALUE (1 << 24)
 
 /**
- * Value marking monitoring group structure as "valid".
- * Group becomes "valid" after successful pqos_mon_start() or
- * pqos_mon_start_pid() call.
- */
-#define GROUP_VALID_MARKER (0x00DEAD00)
-
-/**
  * ---------------------------------------
  * Local data types
  * ---------------------------------------
@@ -145,11 +138,12 @@
  * Local data structures
  * ---------------------------------------
  */
-static const struct pqos_cap *m_cap = NULL; /**< capabilities structure
-                                               passed from cap */
 static const struct pqos_cpuinfo *m_cpu = NULL; /**< cpu topology passed
                                                    from cap */
 static unsigned m_rmid_max = 0;         /**< max RMID */
+#ifdef __linux__
+static int m_interface = PQOS_INTER_MSR;
+#endif
 /**
  * ---------------------------------------
  * Local Functions
@@ -200,64 +194,63 @@ scale_event(const enum pqos_mon_event event, const uint64_t val);
 
 int
 pqos_mon_init(const struct pqos_cpuinfo *cpu,
-              const struct pqos_cap *cap,
-              const struct pqos_config *cfg)
+            const struct pqos_cap *cap,
+            const struct pqos_config *cfg)
 {
         const struct pqos_capability *item = NULL;
-        int ret = PQOS_RETVAL_OK;
+        int ret;
 
-        UNUSED_PARAM(cfg);
-
-        m_cpu = cpu;
-        m_cap = cap;
-
-#ifndef PQOS_NO_PID_API
-        /**
-         * Init monitoring processes
-         */
-        ret = pqos_pid_init(m_cap);
-        if (ret == PQOS_RETVAL_ERROR)
-                return ret;
-#endif /* PQOS_NO_PID_API */
-
+	ASSERT(cfg != NULL);
         /**
          * If monitoring capability has been discovered
          * then get max RMID supported by a CPU socket
          * and allocate memory for RMID table
          */
         ret = pqos_cap_get_type(cap, PQOS_CAP_TYPE_MON, &item);
-        if (ret != PQOS_RETVAL_OK)
-                return PQOS_RETVAL_RESOURCE;
+        if (ret != PQOS_RETVAL_OK) {
+                ret = PQOS_RETVAL_RESOURCE;
+		goto pqos_mon_init_exit;
+	}
 
         ASSERT(item != NULL);
         m_rmid_max = item->u.mon->max_rmid;
-        if (m_rmid_max == 0) {
+        if (cfg->interface == PQOS_INTER_MSR && m_rmid_max == 0) {
                 pqos_mon_fini();
                 return PQOS_RETVAL_PARAM;
         }
 
         LOG_DEBUG("Max RMID per monitoring cluster is %u\n", m_rmid_max);
-        return PQOS_RETVAL_OK;
+#ifdef __linux__
+        if (cfg->interface == PQOS_INTER_OS ||
+                cfg->interface == PQOS_INTER_OS_RESCTRL_MON)
+                ret = os_mon_init(cpu, cap);
+        if (ret != PQOS_RETVAL_OK)
+                return ret;
+#endif
+ pqos_mon_init_exit:
+        m_cpu = cpu;
+#ifdef __linux__
+        m_interface = cfg->interface;
+#else
+        UNUSED_PARAM(cfg);
+#endif
+        return ret;
 }
 
 int
 pqos_mon_fini(void)
 {
-        int retval = PQOS_RETVAL_OK;
-
-#ifndef PQOS_NO_PID_API
-        /**
-         * Shut down monitoring processes
-         */
-        if (pqos_pid_fini() != PQOS_RETVAL_OK)
-                LOG_ERROR("Failed to finalize PID monitoring API\n");
-#endif /* PQOS_NO_PID_API */
+        int ret = PQOS_RETVAL_OK;
 
         m_rmid_max = 0;
-
+#ifdef __linux__
+        if (m_interface == PQOS_INTER_OS ||
+                m_interface == PQOS_INTER_OS_RESCTRL_MON)
+                ret = os_mon_fini();
+#endif
         m_cpu = NULL;
-        m_cap = NULL;
-        return retval;
+
+        return ret;
 }
 
 /*
@@ -305,8 +298,7 @@ rmid_alloc(const unsigned cluster,
          * - look for the \a event in the event list
          * - find max RMID matching the \a event
          */
-        ASSERT(m_cap != NULL);
-        ret = pqos_cap_get_type(m_cap, PQOS_CAP_TYPE_MON, &item);
+        ret = _pqos_cap_get_type(PQOS_CAP_TYPE_MON, &item);
         if (ret != PQOS_RETVAL_OK)
                 return ret;
         ASSERT(item != NULL);
@@ -330,8 +322,6 @@ rmid_alloc(const unsigned cluster,
 
         /**
          * Check for free RMID in the cluster by reading current associations.
-         * Do it backwards (from max to 0) in order to preserve low RMID values
-         * for overlapping RMID ranges for future events.
          */
         core_list = pqos_cpu_get_cores_l3id(m_cpu, cluster, &core_count);
         if (core_list == NULL)
@@ -350,16 +340,15 @@ rmid_alloc(const unsigned cluster,
         }
 
         ret = PQOS_RETVAL_ERROR;
-        for (i = max_rmid; i > 0; i--) {
-                const unsigned tmp_rmid = i - 1;
+        for (i = 1; i < max_rmid; i++) {
                 unsigned j = 0;
 
                 for (j = 0; j < core_count; j++)
-                        if (tmp_rmid == rmid_list[j])
+                        if (i == rmid_list[j])
                                 break;
                 if (j >= core_count) {
                         ret = PQOS_RETVAL_OK;
-                        *rmid = tmp_rmid;
+                        *rmid = i;
                         break;
                 }
         }
@@ -396,10 +385,13 @@ rmid_alloc(const unsigned cluster,
 static uint64_t
 scale_event(const enum pqos_mon_event event, const uint64_t val)
 {
+        const struct pqos_cap *cap;
         const struct pqos_monitor *pmon;
         int ret;
 
-        ret = pqos_cap_get_event(m_cap, event, &pmon);
+        _pqos_cap_get(&cap, NULL);
+
+        ret = pqos_cap_get_event(cap, event, &pmon);
         ASSERT(ret == PQOS_RETVAL_OK);
         if (ret != PQOS_RETVAL_OK)
                 return val;
@@ -473,12 +465,10 @@ mon_assoc_get(const unsigned lcore,
 }
 
 int
-pqos_mon_assoc_get(const unsigned lcore,
+hw_mon_assoc_get(const unsigned lcore,
                    pqos_rmid_t *rmid)
 {
         int ret = PQOS_RETVAL_OK;
-
-        _pqos_api_lock();
 
         ret = _pqos_check_init(1);
         if (ret != PQOS_RETVAL_OK)
@@ -499,16 +489,13 @@ pqos_mon_assoc_get(const unsigned lcore,
         ret = mon_assoc_get(lcore, rmid);
 
  pqos_mon_assoc_get__error:
-        _pqos_api_unlock();
         return ret;
 }
 
-int pqos_mon_reset(void)
+int hw_mon_reset(void)
 {
         int ret = PQOS_RETVAL_OK;
         unsigned i;
-
-        _pqos_api_lock();
 
         ret = _pqos_check_init(1);
         if (ret != PQOS_RETVAL_OK)
@@ -523,7 +510,6 @@ int pqos_mon_reset(void)
         }
 
  pqos_mon_reset_error:
-        _pqos_api_unlock();
         return ret;
 }
 
@@ -543,42 +529,52 @@ int pqos_mon_reset(void)
 static int
 mon_read(const unsigned lcore,
          const pqos_rmid_t rmid,
-         const enum pqos_mon_event event,
+         const unsigned event,
          uint64_t *value)
 {
-        int retries = 3, retval = PQOS_RETVAL_OK;
-        uint32_t reg = 0;
+        int retries = 0, retval = PQOS_RETVAL_ERROR;
         uint64_t val = 0;
+        uint64_t val_evtsel = 0;
+        int flag_wrt = 1;
 
         /**
          * Set event selection register (RMID + event id)
          */
-        reg = PQOS_MSR_MON_EVTSEL;
-        val = ((uint64_t)rmid) & PQOS_MSR_MON_EVTSEL_RMID_MASK;
-        val <<= PQOS_MSR_MON_EVTSEL_RMID_SHIFT;
-        val |= ((uint64_t)event) & PQOS_MSR_MON_EVTSEL_EVTID_MASK;
-        if (msr_write(lcore, reg, val) != MACHINE_RETVAL_OK)
-                return PQOS_RETVAL_ERROR;
+        val_evtsel = ((uint64_t)rmid) & PQOS_MSR_MON_EVTSEL_RMID_MASK;
+        val_evtsel <<= PQOS_MSR_MON_EVTSEL_RMID_SHIFT;
+        val_evtsel |= ((uint64_t)event) & PQOS_MSR_MON_EVTSEL_EVTID_MASK;
 
-        /**
-         * read selected data associated with previously selected RMID+event
-         */
-        reg = PQOS_MSR_MON_QMC;
-        do {
-                if (msr_read(lcore, reg, &val) != MACHINE_RETVAL_OK) {
-                        retval = PQOS_RETVAL_ERROR;
-                        break;
+        for (retries = 0; retries < 4; retries++) {
+                if (flag_wrt) {
+                        if (msr_write(lcore, PQOS_MSR_MON_EVTSEL,
+                                      val_evtsel) != MACHINE_RETVAL_OK)
+                                break;
                 }
-                if ((val&(PQOS_MSR_MON_QMC_ERROR)) != 0ULL) {
-                        /**
-                         * Unsupported event id or RMID selected
+                if (msr_read(lcore, PQOS_MSR_MON_QMC,
+                             &val) != MACHINE_RETVAL_OK)
+                        break;
+                if ((val & PQOS_MSR_MON_QMC_ERROR) != 0ULL) {
+                        /* Read back IA32_QM_EVTSEL register
+                         * to check for content change.
                          */
-                        retval = PQOS_RETVAL_ERROR;
-                        break;
+                        if (msr_read(lcore, PQOS_MSR_MON_EVTSEL,
+                                     &val) != MACHINE_RETVAL_OK)
+                                break;
+                        if (val != val_evtsel) {
+                                flag_wrt = 1;
+                                continue;
+                        }
                 }
-                retries--;
-        } while ((val&PQOS_MSR_MON_QMC_UNAVAILABLE) != 0ULL && retries > 0);
-
+                if ((val & PQOS_MSR_MON_QMC_UNAVAILABLE) != 0ULL) {
+                        /**
+                         * Waiting for monitoring data
+                         */
+                        flag_wrt = 0;
+                        continue;
+                }
+                retval = PQOS_RETVAL_OK;
+                break;
+        }
         /**
          * Store event value
          */
@@ -586,7 +582,7 @@ mon_read(const unsigned lcore,
                 *value = (val & PQOS_MSR_MON_QMC_DATA_MASK);
         else
                 LOG_WARN("Error reading event %u on core %u (RMID%u)!\n",
-                         (unsigned) event, lcore, (unsigned) rmid);
+                         event, lcore, (unsigned) rmid);
 
         return retval;
 }
@@ -882,7 +878,7 @@ ia32_perf_counter_stop(const unsigned num_cores,
 }
 
 int
-pqos_mon_start(const unsigned num_cores,
+hw_mon_start(const unsigned num_cores,
                const unsigned *cores,
                const enum pqos_mon_event event,
                void *context,
@@ -894,58 +890,32 @@ pqos_mon_start(const unsigned num_cores,
         unsigned i = 0;
         int ret = PQOS_RETVAL_OK;
         int retval = PQOS_RETVAL_OK;
+        const struct pqos_cap *cap;
 
-        if (group == NULL || cores == NULL || num_cores == 0 || event == 0)
-                return PQOS_RETVAL_PARAM;
-
-        if (group->valid == GROUP_VALID_MARKER)
-                return PQOS_RETVAL_PARAM;
-
-        memset(group, 0, sizeof(*group));
-
-        _pqos_api_lock();
-
-        ret = _pqos_check_init(1);
-        if (ret != PQOS_RETVAL_OK) {
-                _pqos_api_unlock();
-                return ret;
-        }
-
+        ASSERT(group != NULL);
+        ASSERT(cores != NULL);
+        ASSERT(num_cores > 0);
+        ASSERT(event > 0);
         ASSERT(m_cpu != NULL);
 
-        /**
-         * Validate event parameter
-         * - only combinations of events allowed
-         * - do not allow non-PQoS events to be monitored on its own
-         */
-        if (event & (~(PQOS_MON_EVENT_L3_OCCUP | PQOS_MON_EVENT_LMEM_BW |
-                       PQOS_MON_EVENT_TMEM_BW | PQOS_MON_EVENT_RMEM_BW |
-                       PQOS_PERF_EVENT_IPC | PQOS_PERF_EVENT_LLC_MISS))) {
-                _pqos_api_unlock();
-                return PQOS_RETVAL_PARAM;
-        }
-        if ((event & (PQOS_MON_EVENT_L3_OCCUP | PQOS_MON_EVENT_LMEM_BW |
-                      PQOS_MON_EVENT_TMEM_BW | PQOS_MON_EVENT_RMEM_BW)) == 0 &&
-            (event & (PQOS_PERF_EVENT_IPC | PQOS_PERF_EVENT_LLC_MISS)) != 0) {
-                _pqos_api_unlock();
-                return PQOS_RETVAL_PARAM;
-        }
+        memset(ctxs, 0, sizeof(ctxs));
+
+        _pqos_cap_get(&cap, NULL);
 
         /**
          * Validate if event is listed in capabilities
          */
         for (i = 0; i < (sizeof(event) * 8); i++) {
-                const enum pqos_mon_event evt_mask = (1 << i);
+                const enum pqos_mon_event evt_mask =
+                        (enum pqos_mon_event)(1U << i);
                 const struct pqos_monitor *ptr = NULL;
 
                 if (!(evt_mask & event))
                         continue;
 
-                ret = pqos_cap_get_event(m_cap, evt_mask, &ptr);
-                if (ret != PQOS_RETVAL_OK || ptr == NULL) {
-                        _pqos_api_unlock();
+                ret = pqos_cap_get_event(cap, evt_mask, &ptr);
+                if (ret != PQOS_RETVAL_OK || ptr == NULL)
                         return PQOS_RETVAL_PARAM;
-                }
         }
 
         /**
@@ -1006,8 +976,9 @@ pqos_mon_start(const unsigned num_cores,
                         ctxs[num_ctxs].cluster = cluster;
 
                         ret = rmid_alloc(cluster,
-                                         event & (~(PQOS_PERF_EVENT_IPC |
-                                                    PQOS_PERF_EVENT_LLC_MISS)),
+                                         (enum pqos_mon_event)(event &
+                                         (~(PQOS_PERF_EVENT_IPC |
+                                         PQOS_PERF_EVENT_LLC_MISS))),
                                          &ctxs[num_ctxs].rmid);
                         if (ret != PQOS_RETVAL_OK) {
                                 retval = ret;
@@ -1021,6 +992,7 @@ pqos_mon_start(const unsigned num_cores,
         /**
          * Fill in the monitoring group structure
          */
+        memset(group, 0, sizeof(*group));
         group->cores = (unsigned *) malloc(sizeof(group->cores[0]) * num_cores);
         if (group->cores == NULL) {
                 retval = PQOS_RETVAL_RESOURCE;
@@ -1086,120 +1058,21 @@ pqos_mon_start(const unsigned num_cores,
                         free(group->cores);
         }
  pqos_mon_start_error1:
-        if (retval == PQOS_RETVAL_OK)
-                group->valid = GROUP_VALID_MARKER;
 
-        _pqos_api_unlock();
         return retval;
 }
 
 int
-pqos_mon_start_pid(const pid_t pid,
-                   const enum pqos_mon_event event,
-                   void *context,
-                   struct pqos_mon_data *group)
-{
-#ifdef PQOS_NO_PID_API
-        UNUSED_PARAM(pid);
-        UNUSED_PARAM(event);
-        UNUSED_PARAM(context);
-        UNUSED_PARAM(group);
-        LOG_ERROR("PID monitoring API not built\n");
-        return PQOS_RETVAL_ERROR;
-#else
-        if (group == NULL || event == 0 || pid < 0)
-                return PQOS_RETVAL_PARAM;
-
-        if (group->valid == GROUP_VALID_MARKER)
-                return PQOS_RETVAL_PARAM;
-
-        int ret = PQOS_RETVAL_OK;
-
-        memset(group, 0, sizeof(*group));
-
-        _pqos_api_lock();
-
-        ret = _pqos_check_init(1);
-        if (ret != PQOS_RETVAL_OK) {
-                _pqos_api_unlock();
-                return ret;
-        }
-
-        /**
-         * Validate event parameter
-         * - only combinations of events allowed
-         * - do not allow non-PQoS events to be monitored on its own
-         */
-        if (event & (~(PQOS_MON_EVENT_L3_OCCUP | PQOS_MON_EVENT_LMEM_BW |
-                       PQOS_MON_EVENT_TMEM_BW | PQOS_MON_EVENT_RMEM_BW |
-                       PQOS_PERF_EVENT_IPC | PQOS_PERF_EVENT_LLC_MISS))) {
-                _pqos_api_unlock();
-                return PQOS_RETVAL_PARAM;
-        }
-        if ((event & (PQOS_MON_EVENT_L3_OCCUP | PQOS_MON_EVENT_LMEM_BW |
-                      PQOS_MON_EVENT_TMEM_BW | PQOS_MON_EVENT_RMEM_BW)) == 0 &&
-            (event & (PQOS_PERF_EVENT_IPC | PQOS_PERF_EVENT_LLC_MISS)) != 0) {
-                _pqos_api_unlock();
-                return PQOS_RETVAL_PARAM;
-        }
-	group->event = event;
-        group->pid = pid;
-        group->context = context;
-
-        ret = pqos_pid_start(group);
-
-        if (ret == PQOS_RETVAL_OK)
-                group->valid = GROUP_VALID_MARKER;
-
-        _pqos_api_unlock();
-        return ret;
-#endif /* PQOS_NO_PID_API */
-}
-
-int
-pqos_mon_stop(struct pqos_mon_data *group)
+hw_mon_stop(struct pqos_mon_data *group)
 {
         int ret = PQOS_RETVAL_OK;
         int retval = PQOS_RETVAL_OK;
         unsigned i = 0;
 
-        if (group == NULL)
-                return PQOS_RETVAL_PARAM;
-
-        if (group->valid != GROUP_VALID_MARKER)
-                return PQOS_RETVAL_PARAM;
-
-        _pqos_api_lock();
-
-        ret = _pqos_check_init(1);
-        if (ret != PQOS_RETVAL_OK) {
-                _pqos_api_unlock();
-                return ret;
-        }
-
-        /**
-         * If monitoring PID's then stop
-         * counters and return
-         */
-        if (group->pid > 0) {
-#ifdef PQOS_NO_PID_API
-                LOG_ERROR("PID monitoring API not built\n");
-                _pqos_api_unlock();
-                return PQOS_RETVAL_ERROR;
-#else
-                /**
-                 * Stop perf counters
-                 */
-                ret = pqos_pid_stop(group);
-                group->valid = 0;
-                _pqos_api_unlock();
-                return ret;
-#endif /* PQOS_NO_PID_API */
-        }
+        ASSERT(group != NULL);
 
         if (group->num_cores == 0 || group->cores == NULL ||
             group->num_poll_ctx == 0 || group->poll_ctx == NULL) {
-                _pqos_api_unlock();
                 return PQOS_RETVAL_PARAM;
         }
 
@@ -1212,15 +1085,11 @@ pqos_mon_stop(struct pqos_mon_data *group)
                 pqos_rmid_t rmid = RMID0;
 
                 ret = pqos_cpu_check_core(m_cpu, lcore);
-                if (ret != PQOS_RETVAL_OK) {
-                        _pqos_api_unlock();
+                if (ret != PQOS_RETVAL_OK)
                         return PQOS_RETVAL_PARAM;
-                }
                 ret = mon_assoc_get(lcore, &rmid);
-                if (ret != PQOS_RETVAL_OK) {
-                        _pqos_api_unlock();
+                if (ret != PQOS_RETVAL_OK)
                         return PQOS_RETVAL_PARAM;
-                }
                 if (rmid != group->poll_ctx[i].rmid)
                         LOG_WARN("Core %u RMID association changed from %u "
                                  "to %u! The core has been hijacked!\n",
@@ -1251,61 +1120,25 @@ pqos_mon_stop(struct pqos_mon_data *group)
         free(group->poll_ctx);
         memset(group, 0, sizeof(*group));
 
-        _pqos_api_unlock();
         return retval;
 }
 
 int
-pqos_mon_poll(struct pqos_mon_data **groups,
+hw_mon_poll(struct pqos_mon_data **groups,
               const unsigned num_groups)
 {
-        int ret = PQOS_RETVAL_OK;
         unsigned i = 0;
 
         ASSERT(groups != NULL);
         ASSERT(num_groups > 0);
-        if (groups == NULL || num_groups == 0 || *groups == NULL)
-                return PQOS_RETVAL_PARAM;
 
         for (i = 0; i < num_groups; i++) {
-                if (groups[i] == NULL)
-                        return PQOS_RETVAL_PARAM;
-                if (groups[i]->valid != GROUP_VALID_MARKER)
-                        return PQOS_RETVAL_PARAM;
-        }
-        _pqos_api_lock();
+                int ret = pqos_core_poll(groups[i]);
 
-        ret = _pqos_check_init(1);
-        if (ret != PQOS_RETVAL_OK) {
-                _pqos_api_unlock();
-                return ret;
-        }
-
-        for (i = 0; i < num_groups; i++) {
-	        /**
-                 * If monitoring PID then read
-                 * counter values
-                 */
-                if (groups[i]->pid > 0) {
-#ifdef PQOS_NO_PID_API
-                        LOG_ERROR("PID monitoring API not built\n");
-                        _pqos_api_unlock();
-                        return PQOS_RETVAL_ERROR;
-#else
-                        ret = pqos_pid_poll(groups[i]);
-			if (ret != PQOS_RETVAL_OK)
-			        LOG_WARN("Failed to read event values "
-					 "for PID %u!\n", groups[i]->pid);
-#endif /* PQOS_NO_PID_API */
-                } else {
-                        ret = pqos_core_poll(groups[i]);
-                        if (ret != PQOS_RETVAL_OK)
-                                LOG_WARN("Failed to read event on "
-                                         "core %u\n", groups[i]->cores[0]);
-                }
+                if (ret != PQOS_RETVAL_OK)
+                        LOG_WARN("Failed to read event on "
+                                 "core %u\n", groups[i]->cores[0]);
 	}
-
-        _pqos_api_unlock();
         return PQOS_RETVAL_OK;
 }
 /*

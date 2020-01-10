@@ -1,7 +1,7 @@
 /*
  * BSD LICENSE
  *
- * Copyright(c) 2014-2016 Intel Corporation. All rights reserved.
+ * Copyright(c) 2014-2019 Intel Corporation. All rights reserved.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -62,7 +62,7 @@ static int sel_monitor_num = 0;
 /**
  * The mask to tell which events to display
  */
-static enum pqos_mon_event sel_events_max = 0;
+static enum pqos_mon_event sel_events_max = (enum pqos_mon_event)0;
 
 /**
  * Maintains a table of core, event, number of events that are
@@ -90,6 +90,11 @@ static struct {
  */
 static int sel_process_num = 0;
 
+/**
+ * Flag to determine which library interface to use
+ */
+static enum pqos_interface interface = PQOS_INTER_MSR;
+
 static void stop_monitoring(void);
 
 /**
@@ -97,7 +102,7 @@ static void stop_monitoring(void);
  *
  * @param [in] signo signal number
  */
-static void monitoring_ctrlc(int signo)
+static void __attribute__((noreturn)) monitoring_ctrlc(int signo)
 {
 	printf("\nExiting[%d]...\n", signo);
         stop_monitoring();
@@ -152,29 +157,42 @@ static inline int process_mode(void)
 static void
 monitoring_get_input(int argc, char *argv[])
 {
-	int num_args = 0, i = 0, sel_pid = 0;
+	int num_args, num_opts = 1, i = 0, sel_pid = 0, help = 0;
 
-        if (argc > 1) {
-                if (!strcmp(argv[1], "-p")) {
+        for (i = 0; i < argc; i++) {
+                if (!strcmp(argv[i], "-p")) {
                         sel_pid = 1;
-                        num_args = argc-2;
-                } else
-                        num_args = argc-1;
+                        num_opts++;
+                } else if (!strcmp(argv[i], "-I")) {
+                        interface = PQOS_INTER_OS;
+                        num_opts++;
+                } else if (!strcmp(argv[i], "-H") || !strcmp(argv[i], "-h")) {
+                        help = 1;
+                        num_opts++;
+                }
         }
-	if (num_args == 0)
-		sel_monitor_num = 0;
-	else if (!strcmp(argv[1], "-h") || !strcmp(argv[1], "-H")) {
+        /* Ensure OS interface selected if monitoring tasks */
+        if (sel_pid && interface == PQOS_INTER_MSR) {
+                printf("Error: PID monitoring requires OS interface "
+                        "selection!\nPlease use the -I option.\n");
+                help = 1;
+        }
+        num_args = (argc - num_opts);
+        if (help) {
 		printf("Usage:  %s [<core1> <core2> <core3> ...]\n"
-                       "        %s -p [<pid1> <pid2> <pid3> ...]\n",
+                       "        %s -I -p [<pid1> <pid2> <pid3> ...]\n",
                        argv[0], argv[0]);
 		printf("Eg   :  %s 1 2 6\n        "
-                       "%s -p 3564 7638 356\n"
+                       "%s -I -p 3564 7638 356\n"
                        "Notes:\n        "
                        "-h      help\n        "
-                       "-p      select process ids to monitor LLC occupancy"
+                       "-I      select library OS interface\n        "
+                       "-p      select process ID's to monitor LLC occupancy"
                        "\n\n", argv[0], argv[0]);
+		exit(EXIT_SUCCESS);
+        } else if (num_args == 0) {
 		sel_monitor_num = 0;
-	} else {
+        } else {
                 if (sel_pid) {
                         if (num_args > PQOS_MAX_PIDS)
                                 num_args = PQOS_MAX_PIDS;
@@ -182,7 +200,7 @@ monitoring_get_input(int argc, char *argv[])
                                 m_mon_grps[i] = malloc(sizeof(**m_mon_grps));
                                 sel_monitor_pid_tab[i].pgrp = m_mon_grps[i];
                                 sel_monitor_pid_tab[i].pid =
-                                        (unsigned) atoi(argv[i+2]);
+                                        (unsigned) atoi(argv[num_opts + i]);
                         }
                         sel_process_num = (int) num_args;
                 } else {
@@ -192,7 +210,7 @@ monitoring_get_input(int argc, char *argv[])
                                 m_mon_grps[i] = malloc(sizeof(**m_mon_grps));
                                 sel_monitor_core_tab[i].pgrp = m_mon_grps[i];
                                 sel_monitor_core_tab[i].core =
-                                        (unsigned) atoi(argv[i+1]);
+                                        (unsigned) atoi(argv[num_opts + i]);
                         }
                         sel_monitor_num = (int) num_args;
                 }
@@ -214,8 +232,8 @@ setup_monitoring(const struct pqos_cpuinfo *cpu_info,
                  const struct pqos_capability * const cap_mon)
 {
 	unsigned i;
-        const enum pqos_mon_event perf_events =
-                PQOS_PERF_EVENT_IPC | PQOS_PERF_EVENT_LLC_MISS;
+        const enum pqos_mon_event perf_events = (enum pqos_mon_event)
+            (PQOS_PERF_EVENT_IPC | PQOS_PERF_EVENT_LLC_MISS);
 
         for (i = 0; (unsigned)i < cap_mon->u.mon->num_events; i++)
                 sel_events_max |= (cap_mon->u.mon->events[i].type);
@@ -256,7 +274,8 @@ setup_monitoring(const struct pqos_cpuinfo *cpu_info,
                         pid_t pid = sel_monitor_pid_tab[i].pid;
                         int ret;
 
-                        ret = pqos_mon_start_pid(pid, PQOS_MON_EVENT_L3_OCCUP,
+                        ret = pqos_mon_start_pids(1, &pid,
+                                                 PQOS_MON_EVENT_L3_OCCUP,
                                                  NULL,
                                                  sel_monitor_pid_tab[i].pgrp);
                         if (ret != PQOS_RETVAL_OK) {
@@ -325,10 +344,15 @@ static void monitoring_loop(void)
                                 double mbr = bytes_to_mb(pv->mbm_remote_delta);
                                 double mbl = bytes_to_mb(pv->mbm_local_delta);
 
-                                printf("%8u %8u %10.1f %10.1f %10.1f\n",
-                                       m_mon_grps[i]->cores[0],
-                                       m_mon_grps[i]->poll_ctx[0].rmid,
-                                       llc, mbl, mbr);
+                                if (interface == PQOS_INTER_OS)
+                                        printf("%8u %s %10.1f %10.1f %10.1f\n",
+                                               m_mon_grps[i]->cores[0],
+                                               "     N/A", llc, mbl, mbr);
+                                else
+                                        printf("%8u %8u %10.1f %10.1f %10.1f\n",
+                                               m_mon_grps[i]->cores[0],
+                                               m_mon_grps[i]->poll_ctx[0].rmid,
+                                               llc, mbl, mbr);
                         }
                 } else {
                         printf("PID       LLC[KB]\n");
@@ -338,7 +362,7 @@ static void monitoring_loop(void)
                                 double llc = bytes_to_kb(pv->llc);
 
                                 printf("%6d %10.1f\n",
-                                       m_mon_grps[i]->pid, llc);
+                                       m_mon_grps[i]->pids[0], llc);
                         }
                 }
 		printf("\nPress Enter to continue or Ctrl+c to exit");
@@ -356,9 +380,14 @@ int main(int argc, char *argv[])
 	int ret, exit_val = EXIT_SUCCESS;
 	const struct pqos_capability *cap_mon = NULL;
 
-	memset(&config, 0, sizeof(config));
+        /* Get input from user */
+	monitoring_get_input(argc, argv);
+
+        memset(&config, 0, sizeof(config));
         config.fd_log = STDOUT_FILENO;
         config.verbose = 0;
+        config.interface = interface;
+
 	/* PQoS Initialization - Check and initialize CAT and CMT capability */
 	ret = pqos_init(&config);
 	if (ret != PQOS_RETVAL_OK) {
@@ -373,9 +402,12 @@ int main(int argc, char *argv[])
 		exit_val = EXIT_FAILURE;
 		goto error_exit;
 	}
-	/* Get input from user */
-	monitoring_get_input(argc, argv);
-	(void) pqos_cap_get_type(p_cap, PQOS_CAP_TYPE_MON, &cap_mon);
+	ret = pqos_cap_get_type(p_cap, PQOS_CAP_TYPE_MON, &cap_mon);
+	if (ret != PQOS_RETVAL_OK) {
+		printf("Error retrieving monitoring capabilities\n");
+		exit_val = EXIT_FAILURE;
+		goto error_exit;
+	}
 	/* Setup the monitoring resources */
 	ret = setup_monitoring(p_cpu, cap_mon);
 	if (ret != PQOS_RETVAL_OK) {

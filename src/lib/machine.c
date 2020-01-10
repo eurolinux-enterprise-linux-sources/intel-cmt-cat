@@ -1,7 +1,7 @@
 /*
  * BSD LICENSE
  *
- * Copyright(c) 2014-2016 Intel Corporation. All rights reserved.
+ * Copyright(c) 2014-2019 Intel Corporation. All rights reserved.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -64,10 +64,11 @@ machine_init(const unsigned max_core_id)
 {
         unsigned i;
 
-        if (max_core_id == 0)
-                return MACHINE_RETVAL_PARAM;
-
         m_maxcores = max_core_id + 1;
+
+        ASSERT(m_msr_fd == NULL);
+        if (m_msr_fd != NULL)
+                return MACHINE_RETVAL_ERROR;
 
         /**
          * Allocate table to hold MSR driver file descriptors

@@ -1,7 +1,7 @@
 /*
  * BSD LICENSE
  *
- * Copyright(c) 2014-2016 Intel Corporation. All rights reserved.
+ * Copyright(c) 2014-2019 Intel Corporation. All rights reserved.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -92,6 +92,7 @@ print_allocation_config(const struct pqos_capability *cap_l3ca,
 		lcores = pqos_cpu_get_cores(cpu_info, sockets[i], &lcount);
 		if (lcores == NULL || lcount == 0) {
 			printf("Error retrieving core information!\n");
+                        free(lcores);
 			return;
 		}
 		printf("Core information for socket %u:\n",
@@ -145,7 +146,9 @@ int main(int argc, char *argv[])
 		goto error_exit;
 	}
 	/* Reset Api */
-	if (pqos_alloc_reset(PQOS_REQUIRE_CDP_ANY) != PQOS_RETVAL_OK)
+        ret = pqos_alloc_reset(PQOS_REQUIRE_CDP_ANY, PQOS_REQUIRE_CDP_ANY,
+                               PQOS_MBA_ANY);
+	if (ret != PQOS_RETVAL_OK)
 		printf("CAT reset failed!\n");
 	else
 		printf("CAT reset successful\n");
